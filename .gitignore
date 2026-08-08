@@ -1,0 +1,9 @@
+data/*.jsonl
+data/*.log
+node_modules/
+.claude/
+.playwright-mcp/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

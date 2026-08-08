@@ -1,0 +1,77 @@
+[
+  {
+    "name": "subagent_start",
+    "payload": {
+      "hook": "SubagentStart",
+      "agent_id": "subagent-1",
+      "agent_type": "Task",
+      "prompt": "调研项目目录结构并列出所有 src 下的文件",
+      "is_resume": false
+    }
+  },
+  {
+    "name": "pre_tool_use",
+    "payload": {
+      "hook": "PreToolUse",
+      "agent_id": "subagent-1",
+      "agent_type": "Task",
+      "tool_name": "Read",
+      "tool_input": { "file_path": "D:/workspace/project/src/main.js" }
+    }
+  },
+  {
+    "name": "pre_tool_use_with_secret",
+    "payload": {
+      "hook": "PreToolUse",
+      "agent_id": "subagent-1",
+      "agent_type": "Task",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "curl -H \"Authorization: Bearer sk-xx\" https://api.example.com",
+        "api_key": "sk-proj-1234567890",
+        "password": "p@ssw0rd",
+        "long_text": "这是一个用于测试字符串截断的超长文本，长度远超 250 字符阈值。在这个位置应该被截断并且追加省略号标记。因为我们只关心超过 250 字符的字符串被正确处理，所以无论如何都要保证这段内容足够长，以便验证截断逻辑确实生效。"
+      }
+    }
+  },
+  {
+    "name": "post_tool_use",
+    "payload": {
+      "hook": "PostToolUse",
+      "agent_id": "subagent-1",
+      "agent_type": "Task",
+      "tool_name": "Grep",
+      "tool_input": { "pattern": "TODO[\\s\\S]+MARK" },
+      "tool_response": {
+        "result": "src/main.js:3:TODO(xxx) 待重构"
+      }
+    }
+  },
+  {
+    "name": "notification",
+    "payload": {
+      "hook": "Notification",
+      "message": "agent_needs_input"
+    }
+  },
+  {
+    "name": "subagent_stop",
+    "payload": {
+      "hook": "SubagentStop",
+      "agent_id": "subagent-1",
+      "agent_type": "Task",
+      "status": "success",
+      "output": "任务已完成，共处理 3 个文件"
+    }
+  },
+  {
+    "name": "subagent_stop_failed",
+    "payload": {
+      "hook": "SubagentStop",
+      "agent_id": "subagent-2",
+      "agent_type": "Code",
+      "status": "error",
+      "error": "工具执行失败：文件不存在"
+    }
+  }
+]
