@@ -6,7 +6,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const PORT = 8617;                       // 本地看板服务端口
 export const STALE_MS = 10 * 60 * 1000;         // agent 超过 10 分钟无任何事件 → 回收
-export const MAX_BYTES = 5 * 1024 * 1024;       // events.jsonl 轮转阈值 5MB
+export const MAX_BYTES = 10 * 1024 * 1024;      // events.jsonl 轮转阈值 10MB（增大以减少频繁轮转导致 readOffset 重置）
 export const EVENTS_FILE = path.join(__dirname, "data", "events.jsonl");   // 事件文件
 export const COLLECT_LOG = path.join(__dirname, "data", "collect.log");    // 采集日志
 export const WEB_DIR = path.join(__dirname, "web");                        // 静态资源目录
+// CORS 允许来源：优先使用环境变量 ALLOWED_ORIGIN，默认 http://localhost:PORT
+export const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || `http://localhost:${PORT}`;

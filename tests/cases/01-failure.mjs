@@ -33,7 +33,7 @@ export default {
       return s && s.classes.includes("status-tool") ? s : null;
     }, 5000, 150, "tool 状态");
     if (toolSnap) {
-      results.push(check("F2 失败前基线：tool 状态有蓝色 spinner", toolSnap.spinner === true, true, toolSnap.spinner, "方案A前提：失败后应不再停留 spinner"));
+      results.push(check("F2 失败前基线：tool 状态有蓝色 spinner", toolSnap.spinner === true, true, toolSnap.spinner, "tool 状态有 spinner"));
     }
 
     // 阶段 3：失败（subagent_stop status=error）

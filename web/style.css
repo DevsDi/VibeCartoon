@@ -161,13 +161,6 @@ body {
 
 .empty-sub { font-size: 14px; color: var(--muted-2); }
 
-.no-active-note {
-  text-align: center;
-  color: var(--muted-2);
-  font-size: 13px;
-  padding: 10px 0 20px;
-}
-
 /* ---------- 7. 看板主区与卡片网格 ---------- */
 /* 看板主区：左主 Agent + 右子 Agent 两栏，整体水平居中（max-width 1440px）：
  * 大屏时容器两侧自然留白（对称、不贴屏幕边缘），小屏时容器自动收窄；
@@ -176,7 +169,7 @@ body {
  * 左栏高度跟随右栏总高（stretch），主卡片保持自然高度并垂直居中于左栏，
  * 子 Agent 数量变化时左栏高度与主卡位置自动跟随。 */
 .board-wrap {
-  position: relative;                /* 关联虚线层绝对定位的参照容器（不改变 Grid 布局） */
+  position: relative;
   max-width: 1440px;                 /* 容器上限：大屏居中留白，小屏自动收窄 */
   margin: 0 auto;                    /* 水平居中 */
   display: grid;
@@ -186,31 +179,6 @@ body {
   align-items: stretch;              /* 两栏等高：左栏拉伸至右栏总高 */
   padding: 0 32px;                   /* 容器内左右留白 */
   margin-bottom: 8px;
-}
-
-/* 主→子关联虚线层：绝对定位覆盖整个看板容器（含跑道），不参与 Grid 布局、
- * 不拦截点击（pointer-events:none）。连线为 SVG 斜虚线，从主卡右缘中心
- * 发散到各子卡左缘中心，由 JS 依据主/子卡片实时坐标动态定位（x1/y1/x2/y2），
- * 形成扇形/树状发散，表达主 Agent 向子 Agent 派发的主从关联。 */
-.conn-layer {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* 发散连线（SVG）：absolute 覆盖层内的全尺寸 svg，后续连线 <line> 全部挂在它上面 */
-.conn-layer svg {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
-/* 单根斜虚线：stroke 居中于坐标线，无需额外偏移（坐标由 JS 计算） */
-.conn-layer line {
-  stroke: rgba(141,151,173,0.45);
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
 }
 
 .board-left, .board-right { min-width: 0; }
@@ -399,7 +367,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  min-width: 22px;
   justify-content: flex-end;
   min-width: 0;               /* 允许工具胶囊收缩 */
   flex-shrink: 1;
@@ -867,48 +834,6 @@ body {
 /* 汇报：带回的绿色勾标 */
 .stickman-runner.report .report-mark { opacity: 1; }
 
-/* ---------- 10c2. 催办小人（子 Agent 静默超时 → 派小人提醒） ---------- */
-/* 红色调：覆盖 .stickman-runner 默认的黄色（nudgeSubAgent 创建时挂 .nudge 类） */
-.stickman-runner.nudge {
-  color: #ef6b6b;
-}
-
-/* 催办小人腿部支点：NUDGE_STICKMAN_SVG 的腿接在 y=28、腿底 y=38（标准小人髋部 y=26），
- * 覆盖全局 .stickman 的 15px 26px，避免走路摆动绕高于髋部的支点旋转而脱节 */
-.stickman-runner.nudge .leg-left,
-.stickman-runner.nudge .leg-right {
-  transform-origin: 15px 28px;
-}
-
-/* 催办气泡：卡片右上角弹出"⏰ 快点！"（showNudgeBubble 追加，约 2.6s 后移除）。
- * .agent-card 是 position:relative 定位锚点，气泡贴其右上角外侧 */
-.nudge-bubble {
-  position: absolute;
-  top: -6px;
-  right: -8px;
-  z-index: 30;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: rgba(239, 68, 68, 0.92);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-  animation: bubblePop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-/* 牢骚气泡（黄色变体）：派发途中目标子 Agent 消失、火柴人掉头返回时由
- * showComplainBubble 挂到主 Agent 卡片右上角；定位/圆角/字号/气泡动画等
- * 其余样式全部复用 .nudge-bubble，仅换底色区分红色"催办" */
-.complain-bubble {
-  background: rgba(245, 158, 11, 0.92); /* 黄底，语义"提醒/牢骚" */
-}
-
-@keyframes bubblePop {
-  from { transform: scale(0.4); opacity: 0; }
-  to   { transform: scale(1); opacity: 1; }
-}
-
 /* ---------- 10d. 派发可见性：新任务标记 / 送达闪光 / 放下文件 ---------- */
 /* 新子 Agent 出现时 JS 在 type-badge 旁插入 .new-task-tag（闪烁 3 次，约 2.2s 后移除） */
 .new-task-tag {
@@ -1023,30 +948,6 @@ body {
 @keyframes celebrateBurst {
   0%   { opacity: 1; transform: translate(0, 0) rotate(0deg) scale(0.5); }
   100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(1.15); }
-}
-
-/* ---------- 11. 元信息行 ---------- */
-.meta-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 18px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
-  font-size: 12.5px;
-  color: var(--muted);
-}
-
-.meta-line .meta-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.meta-line b {
-  color: var(--text);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 12. 元信息行 ---------- */
@@ -1182,7 +1083,6 @@ body {
   .header-inner { padding: 20px 18px 16px; }
   .brand-title { font-size: 26px; }
   .board-wrap { padding: 0 16px; }
-  .conn-layer { display: none; }  /* 窄屏单栏：隐藏主→子关联虚线（无跑道可画） */
   .app-footer { padding: 0 18px 22px; }
 }
 

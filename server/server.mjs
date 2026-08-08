@@ -11,7 +11,7 @@
 import { createServer } from "node:http";
 import { stat, open as openFile, readFile, rename, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { PORT, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS } from "../config.mjs";
+import { PORT, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS, ALLOWED_ORIGIN } from "../config.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -28,36 +28,44 @@ const MIME = {
 };
 
 // ---------------------------------------------------------------------------
+// 事件文件通用区间读取：从 offset 开始读取到文件末尾，返回行数组
+// 文件不存在或 offset 超出范围时返回空数组；文件被截断时自动回退到 0
+// ---------------------------------------------------------------------------
+async function readFileRange(filePath, offset, maxSize = Infinity) {
+  let size;
+  try {
+    size = (await stat(filePath)).size;
+  } catch {
+    return { lines: [], size: 0, truncated: true };
+  }
+  if (size < offset) {
+    // 文件被截断或轮转，重置 offset 从头读
+    return { lines: [], size, truncated: true };
+  }
+  if (size === offset) return { lines: [], size, truncated: false };
+
+  const readLen = Math.min(size - offset, maxSize);
+  const fh = await openForRead(filePath);
+  const buf = Buffer.alloc(readLen);
+  try {
+    const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
+    const text = buf.subarray(0, bytesRead).toString("utf8");
+    return { lines: text.split(/\r?\n/).filter(Boolean), size, truncated: false };
+  } finally {
+    await closeHandle(fh);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 事件文件增量读：记录已读字节 offset，文件被截断/轮转时回到 0
 // ---------------------------------------------------------------------------
 let readOffset = 0;
 
 async function readNewLines() {
-  let size;
-  try {
-    size = (await stat(EVENTS_FILE)).size;
-  } catch {
-    // 文件不存在：从头开始
-    readOffset = 0;
-    return [];
-  }
-
-  if (size < readOffset) {
-    // 文件被截断或轮转，重置 offset 从头读
-    readOffset = 0;
-  }
-  if (size === readOffset) return [];
-
-  const fh = await openForRead(EVENTS_FILE);
-  const buf = Buffer.alloc(size - readOffset);
-  try {
-    const { bytesRead } = await fh.read(buf, 0, buf.length, readOffset);
-    const text = buf.subarray(0, bytesRead).toString("utf8");
-    readOffset = size;
-    return text.split(/\r?\n/).filter(Boolean);
-  } finally {
-    await closeHandle(fh);
-  }
+  const result = await readFileRange(EVENTS_FILE, readOffset);
+  if (result.truncated) readOffset = 0;
+  readOffset = result.size;
+  return result.lines;
 }
 
 async function openForRead(p) {
@@ -83,7 +91,7 @@ async function initReadOffset() {
 // agents: Map<id, agentInfo>
 // agentInfo: {
 //   id, type, status, currentTool, toolCount,
-//   startTime, endTime, lastSeen, history: [最多6条状态简记]
+//   startTime, endTime, lastSeen, history: [最多 MAX_HISTORY 条状态简记]
 // }
 const agents = new Map();
 let lastActiveKey = null; // 供无 agent 归属的 Notification 使用
@@ -98,6 +106,7 @@ const pendingDispatch = []; // [{ name, ts }]
 
 const CLEANUP_INTERVAL = 60 * 1000; // 清理间隔 1 分钟（STALE_MS 统一在 config.mjs）
 const NAME_STALE_MS = 60 * 1000;    // agentNames 未消费条目的过期时限
+const MAX_HISTORY = 6;               // 每个 Agent 的 history 数组最大条目数
 
 function newAgent(id, type) {
   return {
@@ -114,12 +123,12 @@ function newAgent(id, type) {
   };
 }
 
-// 向 history 追加状态简记，连续重复合并，最多留最近 6 条
+// 向 history 追加状态简记，连续重复合并，最多留最近 MAX_HISTORY 条
 function pushHistory(a, note) {
   const h = a.history;
   if (h.length > 0 && h[h.length - 1] === note) return;
   h.push(note);
-  if (h.length > 6) h.splice(0, h.length - 6);
+  if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
 }
 
 // 定时回收超时无事件的 Agent：任何状态（queued/thinking/tool/asking/done/failed），
@@ -127,7 +136,9 @@ function pushHistory(a, note) {
 function cleanupInactiveAgents() {
   const now = Date.now();
   for (const [key, a] of [...agents]) {
-    if (key === "main") continue; // 主会话绑定长会话上下文，空闲超时不回收，避免掉卡
+    // 主 Agent（main）绑定用户会话上下文，其生命周期应与看板前端一致而非跟随单次任务结束。
+    // 回收 main 会导致看板主卡消失、后续事件无法挂载到主入口，因此对 main 豁免超时回收。
+    if (key === "main") continue;
     const lastSeen = a.lastSeen ? Date.parse(a.lastSeen) : 0;
     if (now - lastSeen > STALE_MS) {
       agents.delete(key);
@@ -291,12 +302,18 @@ function applyEvent(e) {
 }
 
 function processLines(lines) {
+  let skipped = 0;
   for (const line of lines) {
     try {
       applyEvent(JSON.parse(line));
-    } catch {
-      // 残缺行（写盘竞态）跳过
+    } catch (err) {
+      // 残缺行（写盘竞态）跳过，记录调试日志便于排查
+      skipped++;
+      console.debug('[server] 跳过无效事件行:', err.message);
     }
+  }
+  if (skipped > 0) {
+    console.debug(`[server] processLines 共跳过 ${skipped} 行无效事件`);
   }
 }
 
@@ -307,7 +324,9 @@ async function maybeRotate() {
   try {
     const st = await stat(EVENTS_FILE);
     if (st.size >= MAX_BYTES) {
-      await rm(EVENTS_FILE + ".1", { force: true });
+      // 保留 2 个历史文件：先删除最旧的 .2，再将 .1 移为 .2，最后将当前文件移为 .1
+      await rm(EVENTS_FILE + ".2", { force: true });
+      await rename(EVENTS_FILE + ".1", EVENTS_FILE + ".2");
       await rename(EVENTS_FILE, EVENTS_FILE + ".1");
       await writeFile(EVENTS_FILE, "", "utf8");
       readOffset = 0;
@@ -320,7 +339,7 @@ async function maybeRotate() {
 // ---------------------------------------------------------------------------
 // 响应工具
 // ---------------------------------------------------------------------------
-const CORS = { "Access-Control-Allow-Origin": "*" };
+const CORS = { "Access-Control-Allow-Origin": ALLOWED_ORIGIN };
 
 function sendJson(res, code, body) {
   const data = JSON.stringify(body);
@@ -374,28 +393,11 @@ const server = createServer(async (req, res) => {
       let offset = sinceParam == null || sinceParam === "" ? 0 : Number(sinceParam);
       if (!Number.isFinite(offset) || offset < 0) offset = 0;
 
-      let size;
-      try { size = (await stat(EVENTS_FILE)).size; }
-      catch { size = 0; }
-
-      if (size < offset) offset = 0;
-      let events = [];
-      if (size > offset) {
-        const fh = await openForRead(EVENTS_FILE);
-        const buf = Buffer.alloc(size - offset);
-        try {
-          const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
-          const text = buf.subarray(0, bytesRead).toString("utf8");
-          events = text.split(/\r?\n/).filter(Boolean);
-        } finally {
-          await closeHandle(fh);
-        }
-        events = events.map((line) => {
-          try { return JSON.parse(line); } catch { return null; }
-        }).filter((e) => e !== null);
-        return sendJson(res, 200, { events, nextOffset: size });
-      }
-      return sendJson(res, 200, { events, nextOffset: size });
+      const result = await readFileRange(EVENTS_FILE, offset);
+      let events = result.lines.map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter((e) => e !== null);
+      return sendJson(res, 200, { events, nextOffset: result.size });
     }
 
     // 静态资源
@@ -463,10 +465,27 @@ async function serveStatic(pathname, res) {
 }
 
 // 启动定时清理
-setInterval(cleanupInactiveAgents, CLEANUP_INTERVAL);
+const cleanupTimer = setInterval(cleanupInactiveAgents, CLEANUP_INTERVAL);
 
 // 启动时序：先定位事件文件末尾（不重放历史），再监听端口
 await initReadOffset();
 server.listen(PORT, () => {
   console.log(`[vc-dashboard] server running at http://localhost:${PORT}`);
 });
+
+// Graceful shutdown：收到终止信号时清理定时器并关闭 HTTP server
+function gracefulShutdown(signal) {
+  console.log(`[server] 收到 ${signal}，正在关闭...`);
+  clearInterval(cleanupTimer);
+  server.close(() => {
+    console.log('[server] HTTP server 已关闭');
+    process.exit(0);
+  });
+  // 防止 server.close 卡住，5 秒后强制退出
+  setTimeout(() => {
+    console.warn('[server] 关闭超时，强制退出');
+    process.exit(1);
+  }, 5000).unref();
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
