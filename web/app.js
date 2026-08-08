@@ -16,6 +16,13 @@
    * 仅影响 main 卡片展示，不改服务端数据；有新事件（lastSeen 刷新）自动恢复真实状态 */
   const IDLE_TIMEOUT = 60000;
 
+  /* 子 Agent 催办（超时无反馈 → 派小人）：距 lastSeen（最近一次通讯时间）超过
+   * 5 分钟且仍在进行中的子 Agent，跑进一只红色 ⏰ 小人并弹"快点"气泡；
+   * 同一子 Agent 冷却 5 分钟，避免 600ms 轮询高频重复触发。 */
+  const NUDGE_THRESHOLD_MS = 5 * 60 * 1000;   // 子 Agent 静默超 5 分钟 → 派小人催办
+  const NUDGE_COOLDOWN_MS = 5 * 60 * 1000;    // 同一子 Agent 催办冷却（避免 600ms 轮询重复触发）
+  const NUDGE_TRAVEL_MS = 2600;               // 催办小人跑动时长（毫秒），约为普通派发的一半
+
   /* "最近工具"最多显示的条数：只取 history 中的 tool:xxx 条目（简化版，
    * thinking/start/done 等状态项不展示） */
   const TOOL_TAIL = 3;
@@ -63,6 +70,17 @@
   let stickmanSeeded = false;   // 首次渲染是否已建立基准（首次不触发火柴人动画）
   let lastMainAgentCallCount = 0; // main 的 history 中派发/补充任务工具调用（Agent/SendMessage）累计次数基准
   let hasSubAgents = false;       // 本轮渲染是否存在存活子 Agent（方案 E：main 正等子 Agent 交回结果时不判待机）
+  let nudged = {};                // 已催办记录：{ [agentId]: 上次催办时间戳 }（催办冷却去重用）
+
+  /* 在途派发小人集合：正在途中（toSub）跑向子 Agent 的火柴人的 agent id。
+   * 掉头（onGone）或到达（arriveTimer 到点）时移除。
+   * animateAgentChanges 据此抑制 done/failed 时重复创建 backToMain 汇报小人：
+   * 子 Agent 完成/失败时若仍有在途派发小人，掉头小人已负责"返回"，不再额外派一只。 */
+  const inFlightToSub = new Set();
+
+  /* 主→子关联虚线集合：subId -> 连线 <line>（SVG 元素，见 syncConnectorLines）。
+   * 每轮渲染后依据主/子卡实时坐标更新，子卡消失（离场/移除）时删除对应连线。 */
+  const connLines = {};
 
   /* ---------------- 启动 ---------------- */
   document.addEventListener('DOMContentLoaded', init);
@@ -76,6 +94,14 @@
     els.noActiveNote = document.getElementById('no-active-note');
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
+    els.connLayer = document.getElementById('conn-layer'); // 主→子关联虚线层
+    // 在覆盖层内创建全尺寸 SVG 容器，后续每根连线 <line> 都挂到它上面（容器本身永不删除）
+    els.connSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    els.connSvg.setAttribute('aria-hidden', 'true');
+    els.connLayer.appendChild(els.connSvg);
+
+    // 窗口尺寸变化时重算连线（主卡居中/子卡位置随布局变化，需跟随重定位）
+    window.addEventListener('resize', syncConnectorLines);
 
     // 火柴人动画层：固定定位覆盖全屏，挂在 body 末尾，不参与布局
     els.animLayer = document.createElement('div');
@@ -166,8 +192,16 @@
     renderMain(mainActive);
     renderActive(subActive, activeCards, els.activeGrid, nowStatus);
 
+    // 子 Agent 静默催办：放在动画之前调用，此时新卡片已进 DOM、坐标可读；
+    // 置于 animateAgentChanges 之前可利用其维护的 stickmanSeeded 做"首帧不催办"守卫
+    checkStaleSubs(agents);
+
     // 火柴人任务动画：放在渲染之后检测，此时新卡片已进 DOM、坐标可读
     animateAgentChanges(agents, nowStatus);
+
+    // 主→子关联虚线：放在动画之后调用，此刻卡片坐标已定、离场类（is-leaving/removing）已挂上，
+    // 本函数据此排除离场卡、仅保留存活子卡的连线
+    syncConnectorLines();
   }
 
   /* ---------------- 火柴人任务动画 ---------------- */
@@ -197,6 +231,20 @@
       '<line class="doc-line" x1="24" y1="9" x2="26" y2="9" stroke="#8d97ad" stroke-width="1" opacity="0"/>' +
       // 汇报时带回的绿色勾标（手右侧小圆点）
       '<circle class="report-mark" cx="25" cy="6" r="3.4" fill="#22c55e" opacity="0"/>' +
+    '</svg>';
+
+  /* 催办小人 SVG（挂在 .stickman-runner.nudge 内，颜色跟随 currentColor → 红色调）。
+   * 头部用 🤨 挑眉斜视，一副"嫌弃你太慢"的神态（子 Agent 静默超时提醒）；
+   * 腿部带 leg-left/leg-right 类复用走路摆动动画；
+   * 头部文字挂 .stick-head 类复用系统彩色 emoji 字体。 */
+  const NUDGE_STICKMAN_SVG =
+    '<svg class="stickman" viewBox="0 0 30 40" aria-hidden="true">' +
+      '<text class="stick-head" x="15" y="14" text-anchor="middle" font-size="12">🤨</text>' +
+      '<line x1="15" y1="16" x2="15" y2="28" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line x1="15" y1="19" x2="7" y2="26" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="15" y1="19" x2="23" y2="26" stroke="currentColor" stroke-width="2"/>' +
+      '<line class="leg-left" x1="15" y1="28" x2="8" y2="38" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="leg-right" x1="15" y1="28" x2="22" y2="38" stroke="currentColor" stroke-width="2.5"/>' +
     '</svg>';
 
   /* main 卡片不存在时（main 未出现时）的起点/终点占位：页面左上角附近 */
@@ -279,8 +327,12 @@
         // 失败不庆祝（走 .task-failed 失败视觉，不再是"保留 ❌ 抖动"）；
         // 动效敏感用户跳过庆祝与延时
         if (isDone && !isReduced) celebrateCard(a.id);
-        // 火柴人跑回汇报：done → 😄 + 带回绿勾；failed → 😢 不带绿勾（第三参 isFailed）
-        runStickman('backToMain', a, !isDone);
+        // 火柴人跑回汇报：done → 😄 + 带回绿勾；failed → 😢 不带绿勾（第三参 isFailed）。
+        // 若该 agent 仍有在途派发小人（inFlightToSub），掉头小人已负责"返回"，
+        // 跳过 backToMain，避免两个小人同时跑回主 Agent 造成视觉重复
+        if (!inFlightToSub.has(a.id)) {
+          runStickman('backToMain', a, !isDone);
+        }
         // 挥手拜拜等待窗口（方案 D）：done = 庆祝 1.8s + 火柴人到达 5s，
         // 让"主 Agent 接住文件"与"子卡挥手告别"同屏；动效敏感用户无火柴人，
         // 保持仅庆祝；失败不庆祝，直接进入挥手
@@ -291,6 +343,93 @@
     prevAgentMap = nowMap;
   }
 
+  /* ---------------- 子 Agent 静默催办 ---------------- */
+  /* 检测进行中子 Agent 静默超时 → 从卡片左侧派一只红色 ⏰ 小人催办。
+   * 每轮轮询（600ms）都调用：距 lastSeen 超 NUDGE_THRESHOLD_MS 且仍在进行中才触发，
+   * 并用 nudged 记录时间戳做冷却去重，避免高频轮询反复派小人。
+   * done（完成）/ failed（失败）/ asking（等待用户输入）不催办。
+   * 应于 animateAgentChanges 之前调用：借 stickmanSeeded 跳过首帧（首次渲染不催办）。 */
+  function checkStaleSubs(agents) {
+    if (!stickmanSeeded) return;              // 首帧不催办（动画基准未建立前不派）
+    const now = Date.now();
+    agents.forEach(function (a) {
+      if (a.id === 'main') return;            // 只催办子 Agent
+      const st = normalizeStatus(a.status);
+      // 完成/失败/等待用户输入不催办
+      if (st === 'done' || st === 'failed' || st === 'asking') return;
+      const last = a.lastSeen ? Date.parse(a.lastSeen) : 0;
+      if (!last || now - last < NUDGE_THRESHOLD_MS) return;   // 未超阈值不催
+      if ((nudged[a.id] || 0) + NUDGE_COOLDOWN_MS > now) return; // 冷却期内不重复派
+      nudged[a.id] = now;
+      nudgeSubAgent(a);
+    });
+
+    // 清理已离场/已消失 Agent 的催办记录，避免长时间运行下 nudged 无界增长
+    const alive = new Map(agents.map(function (a) { return [a.id, true]; }));
+    Object.keys(nudged).forEach(function (id) {
+      if (!alive.has(id)) delete nudged[id];
+    });
+  }
+
+  /* 派催办小人：从卡片左侧外跑向卡片边缘（复用 driveStickman 的逐帧驱动与滚动补偿），
+   * 到达时刻弹出"快点"气泡并移除小人。NUDGE_TRAVEL_MS 走完全程（普通派发约一半时长）。 */
+  function nudgeSubAgent(agent) {
+    const card = getCardElById(agent.id);
+    if (!card) return;
+    // 动效敏感用户：降级为只弹气泡、不派小人（避免完全无反馈且被冷却压制）
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      showNudgeBubble(agent.id);
+      return;
+    }
+
+    const c = card.getBoundingClientRect();      // 视口坐标（fixed 动画层同坐标系）
+    const y = c.top + c.height / 2;              // 卡片垂直中心（.stickman-runner 顶端对齐，同 runStickman）
+    const startX = c.left - 46;                  // 起点：卡片左缘外侧 46px（"从左侧进入"）
+    const endX = c.left - 22;                    // 终点：小人身体中心对齐卡片左缘
+
+    const stick = document.createElement('div');
+    stick.className = 'stickman-runner nudge';
+    stick.innerHTML = NUDGE_STICKMAN_SVG;
+    stick.style.transition = 'none';             // 位置由 JS 逐帧驱动，禁用 CSS 过渡（同 runStickman）
+    els.animLayer.appendChild(stick);
+
+    // 直线段跑向卡片；driveStickman 在 totalMs + 100ms 后自行移除（兜底本次 setTimeout 亦会移除）
+    driveStickman(stick, [
+      { x: startX, y: y, dur: 0 },
+      { x: endX,   y: y, dur: NUDGE_TRAVEL_MS }
+    ], NUDGE_TRAVEL_MS);
+
+    // 到达时刻：弹气泡并移除小人
+    window.setTimeout(function () {
+      showNudgeBubble(agent.id);
+      if (stick.parentNode) stick.parentNode.removeChild(stick);
+    }, NUDGE_TRAVEL_MS);
+  }
+
+  /* 催办气泡：卡片右上角弹出"快点"标签（CSS bubblePop 弹性入场），约 2.6s 后移除。 */
+  function showNudgeBubble(id) {
+    const el = getCardElById(id);
+    if (!el || !el.isConnected) return;
+    const b = document.createElement('span');
+    b.className = 'nudge-bubble';
+    b.textContent = '🤨 挑眉看你，快点！';
+    el.appendChild(b);
+    window.setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 2600);
+  }
+
+  /* 牢骚气泡：主 Agent 卡片右上角弹出"人跑了"标签。复用 .nudge-bubble 的定位结构
+   * 与弹性入场动画，追加黄色变体 .complain-bubble（style.css）区分红色催办，
+   * 约 2.6s 后移除。 */
+  function showComplainBubble(text) {
+    const el = getCardElById('main');
+    if (!el || !el.isConnected) return;
+    const b = document.createElement('span');
+    b.className = 'nudge-bubble complain-bubble';
+    b.textContent = text || '🤨 嘿，人跑了，我先撤！';
+    el.appendChild(b);
+    window.setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 2600);
+  }
+
   /* 缓动：ease-in-out（二次贝塞尔近似） */
   function easeInOut(p) {
     return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
@@ -299,8 +438,11 @@
   /* 火柴人位置驱动：16ms 定时器逐帧插值，逐段 ease-in-out。
    * 不依赖 CSS transition / requestAnimationFrame（低帧率或节流环境下也稳定）。
    * path: [{ x, y, dur }, ...] 依次经过的路径点（首点为起点，dur 为到达该点的用时）；
-   * totalMs 结束后停止并移除火柴人。 */
-  function driveStickman(stick, path, totalMs) {
+   * totalMs 结束后停止并移除火柴人。
+   * opts（可选）：{ targetId, onGone } 目标消失检测——派发（toSub）途中逐帧检查
+   * 目标卡片是否已消失，一旦消失立即停止并回调 onGone(stick) 掉头返回；
+   * 现有 nudge / backToMain 等调用不传 opts，行为完全不变。 */
+  function driveStickman(stick, path, totalMs, opts) {
     const t0 = Date.now();
     // 滚动补偿（方案：滚动错位修复）：path 坐标是动画开始时一次性读取的
     // getBoundingClientRect 视口坐标，而火柴人容器是 fixed 定位。动画期间页面
@@ -311,7 +453,32 @@
     const scrollDelta = function () {
       return t0ScrollY - window.scrollY;
     };
+    // interval 与移除定时器句柄统一管理：正常走完由移除定时器清理，
+    // 途中目标消失则由 cancel() 一并清除（防止继续插值 / 重复回调）
+    let timer = null;
+    let removeTimer = null;
+    const cancel = function () {
+      if (removeTimer) { window.clearTimeout(removeTimer); removeTimer = null; }
+      if (timer) { window.clearInterval(timer); timer = null; }
+    };
     const step = function () {
+      // 目标消失检测：动画进行中逐帧检查目标卡片是否已消失（不存在/未连接/
+      // done 庆祝期 .celebrating、done/failed 离场 .is-leaving / 移除 .removing）。
+      // .celebrating（done 庆祝期）也算消失——子 agent 已完成/失败，派发小人应掉头
+      // 撤回（否则 5s 派发走完时庆祝早已挂上，牢骚掉头永远等不到）。检测到消失 →
+      // 停表并回调 onGone 掉头返回，不再继续插值
+      if (opts && opts.targetId && Date.now() - t0 < totalMs) {
+        const el = getCardElById(opts.targetId);
+        const gone = !el || !el.isConnected
+          || el.classList.contains('celebrating')
+          || el.classList.contains('is-leaving')
+          || el.classList.contains('removing');
+        if (gone) {
+          cancel();
+          if (opts.onGone) opts.onGone(stick);
+          return;
+        }
+      }
       const t = Math.min(Date.now() - t0, totalMs);
       // 定位当前所在路径段
       let acc = 0;
@@ -332,20 +499,24 @@
       stick.style.left = (from.x + (to.x - from.x) * p) + 'px';
       stick.style.top = (from.y + (to.y - from.y) * p + scrollDelta()) + 'px';
     };
-    step();
-    const timer = window.setInterval(step, 16);
-    window.setTimeout(function () {
-      window.clearInterval(timer);
+    // 先注册 interval / 移除定时器，再画首帧：即使首帧就检测到目标消失，
+    // cancel() 也能清掉刚注册的句柄，保证 onGone 只回调一次
+    timer = window.setInterval(step, 16);
+    removeTimer = window.setTimeout(function () {
+      cancel();
       if (stick.parentNode) stick.parentNode.removeChild(stick);
     }, totalMs + 100);
+    step();
   }
 
   /* direction: 'toSub'（主 → 子）| 'backToMain'（子 → 主）
    * isFailed（仅 backToMain 有效）：子 Agent 最终状态为 failed 时火柴人表情切换为
    * 😢 且不带汇报绿勾（.report 仅在 done 时挂，见 style.css）。
-   * 三段式路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有宽阔跑道（列间 gap 100px）。
-   * 火柴人先水平穿过跑道 → 在跑道内垂直移动到目标卡片中心高度 → 水平切入/切出卡片边缘，
-   * 全程不与其他卡片重叠；窄屏单栏（两栏间距 < 30px）时退化为直线过渡。 */
+   * 路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有宽阔跑道（列间 gap 100px）。
+   * 两栏布局（跑道 ≥ 30px）时火柴人沿虚线方向直线过渡——从来源卡片右缘中心斜线
+   * 走到目标卡片左缘中心，方向与 SVG 发散虚线一致（虚线也由主卡右缘中心 → 子卡
+   * 左缘中心，火柴人只是起点/终点在卡片边缘 ±20px 内、y 相同 → 平行贴合虚线）；
+   * 窄屏单栏（两栏间距 < 30px）时同样退化为直线过渡。 */
   function runStickman(direction, agent, isFailed) {
     const layer = els.animLayer;
     if (!layer || !agent || agent.id === 'main') return;
@@ -385,33 +556,50 @@
     const startY = fromRect.top + fromRect.height / 2;
     const endX = direction === 'toSub' ? toRect.left + 20 : toRect.right - 20;
     const endY = toRect.top + toRect.height / 2;
-    // 跑道内垂直移动的专用 x 通道：紧贴目标卡片外侧 24px（位于两栏之间，
-    // 与放大后的火柴人半宽匹配，全程不压卡片）
-    const gapX = direction === 'toSub' ? toRect.left - 24 : toRect.right + 24;
     // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
     const runway = direction === 'toSub'
       ? toRect.left - fromRect.right
       : fromRect.left - toRect.right;
 
     let totalMs;
+    // 派发（toSub）到达定时器句柄：到点执行"送达文件"效果；途中掉头（onGone）
+    // 时先清理，避免对已消失的卡片继续执行送达
+    let arriveTimer = null;
+    // 派发（toSub）途中的目标检测参数：driveStickman 逐帧检查目标子 Agent 卡片
+    // 是否已消失（done 庆祝期 .celebrating、done/failed 离场 .is-leaving、
+    // 移除 .removing 或已不在 DOM），一旦消失立即停下并掉头返回主 Agent
+    // （returnBackAfterGone 弹牢骚气泡）。backToMain 汇报不检测（目标是常驻主
+    // Agent），保持原逻辑。
+    const toSubGoneOpts = {
+      targetId: agent.id,
+      onGone: function (stick) {
+        // 掉头前清理到达定时器（送达效果已无意义）并注销在途标记
+        if (arriveTimer) { window.clearTimeout(arriveTimer); arriveTimer = null; }
+        inFlightToSub.delete(agent.id);
+        returnBackAfterGone(stick, agent.id);
+      }
+    };
+    // 登记在途派发小人：done/failed 时 animateAgentChanges 据此抑制重复创建
+    // backToMain 汇报小人（掉头小人已负责返回）；到达（arriveTimer）或掉头时移除。
+    // 仅派发（toSub）登记——backToMain 不涉及掉头，且不受 toSub 在途语义约束
+    if (direction === 'toSub') inFlightToSub.add(agent.id);
     if (runway >= 30) {
-      // 两栏布局：水平(1.8s) → 垂直(2.4s) → 水平(0.8s) 三段式，全程在跑道内
-      // （派发 toSub 与汇报 backToMain 共用本路径；总时长 = STICKMAN_TRAVEL_MS 5s）
-      const PH1 = 1800, PH2 = 2400, PH3 = 800;
+      // 两栏布局：沿虚线方向直线过渡（派发 toSub 与汇报 backToMain 共用本路径）。
+      // 火柴人从来源卡片边缘中心斜线走到目标卡片边缘中心，方向与 SVG 发散虚线一致
+      // （虚线由主卡右缘中心 → 子卡左缘中心）；起点/终点均在卡片边缘 ±20px 内，
+      // 斜线全程位于两栏之间的跑道区域，不压卡片。总时长 = STICKMAN_TRAVEL_MS 5s
       totalMs = STICKMAN_TRAVEL_MS;
       driveStickman(stick, [
         { x: startX, y: startY, dur: 0 },
-        { x: gapX,   y: startY, dur: PH1 },
-        { x: gapX,   y: endY,   dur: PH2 },
-        { x: endX,   y: endY,   dur: PH3 }
-      ], totalMs);
+        { x: endX,   y: endY,   dur: totalMs }
+      ], totalMs, direction === 'toSub' ? toSubGoneOpts : null);
     } else {
       // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s，与两栏节奏接近）
       totalMs = STICKMAN_TRAVEL_MS;
       driveStickman(stick, [
         { x: startX, y: startY, dur: 0 },
         { x: endX,   y: endY,   dur: totalMs }
-      ], totalMs);
+      ], totalMs, direction === 'toSub' ? toSubGoneOpts : null);
     }
 
     // 派发动画（toSub）到达终点：子 Agent 办公小人接住文件 + 送达闪光 + 放下文件。
@@ -419,7 +607,11 @@
     // （.has-file：手臂前伸 + 文件浮现），并落一个 📄 闪一下边框，短暂停留后移除，
     // 让用户明确看到"任务送到了子 Agent"。
     if (direction === 'toSub') {
-      window.setTimeout(function () {
+      // 到达定时器：派发小人已到达目标，注销在途标记并执行送达效果；
+      // 若途中已掉头（onGone 已清理 arriveTimer），本回调不会执行
+      arriveTimer = window.setTimeout(function () {
+        // 小人已到达，派发完成：移除在途标记（掉头路径已在 onGone 注销）
+        inFlightToSub.delete(agent.id);
         const el = getCardElById(agent.id);
         if (!el) return; // 卡片已被移除（如离场动画中）→ 跳过送达效果
         // 交接第一步：子 Agent 办公小人伸手接住文件
@@ -448,6 +640,43 @@
       // done（成功）→ 绿色"收到" + 😄；failed（失败）→ 红色"驳回" + 😟
       window.setTimeout(function () { mainReceiveFile(!isFailed); }, totalMs);
     }
+  }
+
+  /* 掉头返回：派发途中的火柴人发现目标子 Agent 卡片已消失（done/failed 离场、
+   * 被移除或已不在 DOM），由 driveStickman 的 onGone 回调到此——给主 Agent 弹
+   * 一句"牢骚"气泡，然后沿跑道折返回主 Agent 卡片（路径参照 backToMain 的
+   * gapX 通道）。主 Agent（main）常驻左栏；若 main 也不存在（如空状态全清）
+   * 则无处可回，直接移除火柴人。 */
+  function returnBackAfterGone(stick, goneAgentId) {
+    if (!stick || !stick.parentNode) return;
+    // 当前位置：取火柴人上次绘制的坐标（含旧滚动补偿；新动画会重算 t0ScrollY，
+    // 可能有 <1 次滚动量跳变，可接受）
+    const cx = parseFloat(stick.style.left);
+    const cy = parseFloat(stick.style.top);
+    const mainEl = getCardElById('main');
+    if (!mainEl || !mainEl.isConnected) {
+      if (stick.parentNode) stick.parentNode.removeChild(stick);
+      return;
+    }
+    // 掉头：镜像翻转面向左（复用 .flip），交回文件一并收起（去掉 with-doc）；
+    // .complain-return 见 style.css：翻转过回来仍保留 😎 头部，避免"无头火柴人"
+    stick.classList.add('flip');
+    stick.classList.add('complain-return');
+    stick.classList.remove('with-doc');
+    // 三段式返回路径：水平折返进跑道 → 垂直移到主卡中心高度 → 水平切入主卡边缘
+    const mr = mainEl.getBoundingClientRect();
+    const mainY = mr.top + mr.height / 2;
+    const gapX = mr.right + 24;
+    const endX = mr.right - 20;
+    const RETURN_MS = 2000; // 比派发 5s 快，掉头返回节奏
+    driveStickman(stick, [
+      { x: cx, y: cy, dur: 0 },
+      { x: gapX, y: cy, dur: 700 },
+      { x: gapX, y: mainY, dur: 800 },
+      { x: endX, y: mainY, dur: 500 }
+    ], RETURN_MS);
+    // 牢骚气泡：挂在主 Agent 卡片右上角（黄色变体，区分红色催办）
+    showComplainBubble('🤨 嘿，人跑了，我先撤！');
   }
 
   /* 任务交接：给卡片办公小人加/去"手持文件"状态。
@@ -599,6 +828,7 @@
    * 仅"无任何 Agent"的空状态调用（服务端重启/清空后旧卡片必须消失）。
    * 残留的离场/闪烁定时器到期后都有 parentNode / 缓存引用守卫，不会误删新卡。 */
   function clearAllCards() {
+    clearConnLines(); // 无任何 Agent：一并清空主→子关联虚线
     [mainCards, activeCards].forEach(function (cache) {
       Object.keys(cache).forEach(function (id) {
         const rec = cache[id];
@@ -607,6 +837,90 @@
     });
     mainCards = {};
     activeCards = {};
+  }
+
+  /* ---------------- 主→子关联虚线（方案 B：SVG 发散斜线） ---------------- */
+  /* 主 Agent 卡片右缘中心 → 每个子 Agent 卡片左缘中心的斜虚线（SVG <line>），
+   * 多子卡时从主卡右缘中心一点发散成扇形/树状，表达"主 Agent 向子 Agent 派发"。
+   * 主卡垂直居中、子卡位置随渲染动态变化，故每轮渲染后调用本函数动态定位：
+   * - 以 board-wrap 左上角为坐标原点（getBoundingClientRect 差值抵消滚动偏移）；
+   * - 主卡不存在/未连接 → 无主从关系，清空全部连线；
+   * - 跑道宽度（子卡左缘 - 主卡右缘）< 30px（窄屏单栏/跑道塌缩）→ 跳过该子卡；
+   * - 子 Agent 完成/失败进入庆祝（.celebrating）或离场（.is-leaving/.removing）即移除连线，
+   *   虚线只表示进行中关联，任务结束即断开。 */
+  function syncConnectorLines() {
+    const layer = els.connLayer;
+    if (!layer) return;
+    const mainEl = getCardElById('main');
+    if (!mainEl || !mainEl.isConnected) {
+      clearConnLines();
+      return;
+    }
+    // SVG 容器：init 中已创建；此处防御性兜底（若早于 init 触发则现场补建）
+    let svg = els.connSvg;
+    if (!svg) {
+      svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('aria-hidden', 'true');
+      layer.appendChild(svg);
+      els.connSvg = svg;
+    }
+    const wrapRect = els.boardWrap.getBoundingClientRect();
+    const mainRect = mainEl.getBoundingClientRect();
+    const seen = {}; // 本轮仍应保留连线的子卡 id 集合
+
+    // 只考虑存活子卡（排除庆祝/离场卡；虚线只表示进行中关联，任务结束即断开）
+    const subCards = els.activeGrid.querySelectorAll(
+      '.agent-card:not(.celebrating):not(.is-leaving):not(.removing)'
+    );
+    for (let i = 0; i < subCards.length; i++) {
+      const card = subCards[i];
+      const id = card.dataset ? card.dataset.id : null;
+      if (!id) continue;
+      const subRect = card.getBoundingClientRect();
+      // 跑道宽度：子卡左缘 - 主卡右缘；过窄（单栏/跑道塌缩）→ 跳过不画
+      const width = subRect.left - mainRect.right;
+      if (width < 30) continue;
+      // 相对 wrap 左上角坐标（视口差值抵消滚动，无需额外滚动补偿）：
+      // 起点 = 主卡右缘中心；终点 = 子卡左缘中心
+      const x1 = mainRect.right - wrapRect.left;
+      const y1 = mainRect.top + mainRect.height / 2 - wrapRect.top;
+      const x2 = subRect.left - wrapRect.left;
+      const y2 = subRect.top + subRect.height / 2 - wrapRect.top;
+      seen[id] = true;
+      if (connLines[id]) {
+        const line = connLines[id];
+        line.setAttribute('x1', x1);
+        line.setAttribute('y1', y1);
+        line.setAttribute('x2', x2);
+        line.setAttribute('y2', y2);
+      } else {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', x1);
+        line.setAttribute('y1', y1);
+        line.setAttribute('x2', x2);
+        line.setAttribute('y2', y2);
+        svg.appendChild(line);
+        connLines[id] = line;
+      }
+    }
+
+    // 移除本轮已不存在子卡的旧连线（子卡完成/失败离场或消失后清理）
+    Object.keys(connLines).forEach(function (id) {
+      if (!seen[id]) removeConnLine(id);
+    });
+  }
+
+  /* 删除单根连线：从 SVG 容器移除 <line> 并清理缓存 */
+  function removeConnLine(id) {
+    const line = connLines[id];
+    if (!line) return;
+    if (line.parentNode) line.parentNode.removeChild(line);
+    delete connLines[id];
+  }
+
+  /* 清空全部连线（空状态 / 主卡消失时调用） */
+  function clearConnLines() {
+    Object.keys(connLines).forEach(removeConnLine);
   }
 
   /* ---------------- 活动卡片网格（主/子分栏，共用一套卡片逻辑） ---------------- */
@@ -814,9 +1128,9 @@
       '<text class="office-head office-head-happy" x="15" y="28" text-anchor="middle" font-size="16">😄</text>' +
       // 失败表情层：子 Agent 失败离场（.task-failed，markCardFailed 加挂）时切换为 😢
       '<text class="office-head office-head-fail" x="15" y="28" text-anchor="middle" font-size="16">😢</text>' +
-      '<line class="office-body" x1="15" y1="28" x2="15" y2="44" stroke="currentColor" stroke-width="2.5"/>' +
-      '<line class="office-arm-l" x1="15" y1="32" x2="26" y2="38" stroke="currentColor" stroke-width="2"/>' +
-      '<line class="office-arm-r" x1="15" y1="32" x2="26" y2="40" stroke="currentColor" stroke-width="2"/>' +
+      '<line class="office-body" x1="15" y1="31" x2="15" y2="44" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="office-arm-l" x1="15" y1="33" x2="26" y2="39" stroke="currentColor" stroke-width="2"/>' +
+      '<line class="office-arm-r" x1="15" y1="33" x2="26" y2="41" stroke="currentColor" stroke-width="2"/>' +
       // 坐姿腿（弯曲在桌下）
       '<line class="office-leg-l" x1="15" y1="44" x2="9" y2="50" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="office-leg-r" x1="15" y1="44" x2="22" y2="50" stroke="currentColor" stroke-width="2.5"/>' +
@@ -834,8 +1148,9 @@
   /* 卡片外壳：头部（任务描述，不显示长 ID）+ 状态区（动态）+ 办公场景 + 元信息 + 历史 */
   function cardShell(agent) {
     const type = typeof agent.type === 'string' && agent.type ? agent.type : 'Agent';
-    // 名称显示：优先任务描述 name；为空时主 Agent 固定显示"主 Agent"，子 Agent 显示 type
-    var name = typeof agent.name === 'string' && agent.name ? agent.name : (agent.id === 'main' ? '主 Agent' : type);
+    // 名称显示：主 Agent 固定显示"主 Agent"（不受服务端可能误写的 name 影响）；
+    // 子 Agent 优先任务描述 name，为空回退显示 type
+    var name = agent.id === 'main' ? '主 Agent' : (typeof agent.name === 'string' && agent.name ? agent.name : type);
     name = truncate(name, 30);
     const badge = agent.id === 'main' ? '主' : type;
     return '' +

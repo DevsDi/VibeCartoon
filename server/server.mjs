@@ -91,6 +91,10 @@ let lastActiveKey = null; // 供无 agent 归属的 Notification 使用
 // post_tool_use 通过 tool_response.agentId 精确登记，subagent_start 按 key 消费，
 // 并行/异步子 Agent 也不会错配（问题2 H1）。
 const agentNames = new Map();
+// 待消费的子 Agent 派发描述队列（LIFO）：pre_tool_use 主 Agent 调 Agent 工具时登记，
+// subagent_start 无精确配对（agentNames 命中）时按"最近一次派发"消费。针对 hooks 事件
+// 未带 prompt/agentId 时子 Agent 拿不到任务描述的场景（显示 type 而非描述）。
+const pendingDispatch = []; // [{ name, ts }]
 
 const CLEANUP_INTERVAL = 60 * 1000; // 清理间隔 1 分钟（STALE_MS 统一在 config.mjs）
 const NAME_STALE_MS = 60 * 1000;    // agentNames 未消费条目的过期时限
@@ -133,6 +137,10 @@ function cleanupInactiveAgents() {
   for (const [id, entry] of agentNames) {
     if (now - entry.ts > NAME_STALE_MS) agentNames.delete(id);
   }
+  // 清理 pendingDispatch 中超过 NAME_STALE_MS 仍未被消费的派发描述，避免长时间运行无界增长
+  while (pendingDispatch.length && now - pendingDispatch[0].ts > NAME_STALE_MS) {
+    pendingDispatch.shift();
+  }
 }
 
 function applyEvent(e) {
@@ -159,8 +167,24 @@ function applyEvent(e) {
       pushHistory(a, "start");
       // 消费 post_tool_use 按 agentId 精确登记的名称（并行子 Agent 不会错配，问题2 H1）
       const entry = agentNames.get(key);
-      // 仅当尚无名称时消费登记（与 pre_tool_use 的 !a.name 守卫一致），避免覆盖已从 tool_input.description 提取的名称
-      if (entry && !a.name) { a.name = entry.name; agentNames.delete(key); }
+      // 名称来源优先级（均仅当尚无 name 时写入，避免覆盖已登记/已提取的名称）：
+      //   ① agentNames —— post_tool_use 的 agentId 精确配对（最可靠）
+      //   ② pendingDispatch —— pre_tool_use 主 Agent 派发 Agent 工具时登记的最近一次任务描述
+      //   ③ 事件自带 detail.prompt（SubagentStart hook 的 prompt 字段，collect.mjs 保留）
+      if (!a.name) {
+        if (entry) { a.name = entry.name; agentNames.delete(key); }
+        else if (pendingDispatch.length) {
+          const pend = pendingDispatch.pop();
+          if (pend && pend.name) a.name = pend.name;
+        }
+        else if (e.detail) {
+          try {
+            const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+            const desc = detail?.prompt ?? detail?.description ?? detail?.prompt_text;
+            if (typeof desc === "string" && desc) a.name = desc;
+          } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
+        }
+      }
       break;
     }
     case "pre_tool_use": {
@@ -179,15 +203,18 @@ function applyEvent(e) {
       } else {
         pushHistory(a, "tool");
       }
-      // 从 tool_input.description 提取任务描述作为 Agent 名称（仅当尚无名称时，避免覆盖 agentNames 配对的任务描述）
-      if (!a.name && e.detail) {
+      // Agent 派发类工具（tool='Agent'，主 Agent 派发子 Agent）：把任务描述登记到待消费队列，
+      // 供即将出现的 subagent_start 提取。不再写给当前 agent —— 否则主 Agent 用 Bash/Grep 等
+      // 普通工具时 description 会污染 main 的名字，且子 Agent 永远拿不到派发描述。
+      // 队列 LIFO：最近一次派发优先；post_tool_use 的 agentId 精确配对优先级更高（见 subagent_start）。
+      if (e.tool === "Agent" && e.detail) {
         try {
-          // 双兼容：detail 可能是 JSON 字符串或已是对象（与 post_tool_use 写法对齐）
           const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-          if (detail && detail.tool_input && detail.tool_input.description) {
-            a.name = detail.tool_input.description;
+          const desc = detail?.tool_input?.description;
+          if (typeof desc === "string" && desc) {
+            pendingDispatch.push({ name: desc, ts: Date.now() });
           }
-        } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
+        } catch { /* detail 不合法或结构不符，忽略 */ }
       }
       a.lastSeen = rawTs;
       break;

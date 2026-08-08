@@ -39,7 +39,9 @@
       </section>
 
       <!-- 看板主区：左主 Agent + 右子 Agent（一列多行） -->
+      <!-- 主→子关联虚线层：放最前保证 DOM 顺序在卡片之前、连线压卡片下方 -->
       <section id="board-wrap" class="board-wrap hidden">
+        <div id="conn-layer" class="conn-layer" aria-hidden="true"></div>
         <div class="board-left">
           <div class="board-left-title">主 Agent</div>
           <div id="main-grid" class="main-agent-grid" aria-label="主 Agent"></div>
