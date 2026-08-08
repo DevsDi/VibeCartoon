@@ -13,6 +13,9 @@
   const POLL_INTERVAL = 600;          // 轮询间隔（毫秒）
   const FETCH_TIMEOUT = 2500;         // 单次请求超时（毫秒），防止轮询堆积
   const HISTORY_TAIL = 6;             // history 轨迹最多显示的条数
+  /* main 主 Agent 空闲判定阈值（毫秒）：lastSeen 距今超过该值 → 前端展示"待机"。
+   * 仅影响 main 卡片展示，不改服务端数据；有新事件（lastSeen 刷新）自动恢复真实状态 */
+  const IDLE_TIMEOUT = 60000;
 
   /* 状态 → 展示元信息 */
   const STATUS_META = {
@@ -20,6 +23,7 @@
     thinking: { emoji: '🔍', label: '思考中' },
     tool:     { emoji: '🛠️', label: '调用工具中' },
     asking:   { emoji: '💬', label: '等待输入' },
+    idle:     { emoji: '😴', label: '待机中' },
     done:     { emoji: '✅', label: '已完成' },
     failed:   { emoji: '❌', label: '失败' },
     running:  { emoji: '🚀', label: '执行中' },
@@ -612,8 +616,22 @@
     return rec;
   }
 
+  /* main 主 Agent 的展示状态：lastSeen 距今超过 IDLE_TIMEOUT（且非完成/失败）时
+   * 显示"待机"（idle，见 STATUS_META），否则按实际状态显示。
+   * 只影响前端展示，不改服务端数据；main 有新事件（lastSeen 刷新）后自动恢复正常状态。
+   * 子 Agent 不走此逻辑（完成/失败走拜拜离场，不适用待机）。 */
+  function effectiveStatus(agent) {
+    if (agent.id === 'main' && agent.lastSeen) {
+      const idleMs = Date.now() - new Date(agent.lastSeen).getTime();
+      if (idleMs > IDLE_TIMEOUT && agent.status !== 'done' && agent.status !== 'failed') {
+        return 'idle';
+      }
+    }
+    return normalizeStatus(agent.status);
+  }
+
   function updateCard(rec, agent) {
-    const status = normalizeStatus(agent.status);
+    const status = effectiveStatus(agent);
     const el = rec.el;
 
     // 1) 状态变化 → 重建状态区（保证 dot/spinner 动画不被 600ms 重绘打断）+ 边框脉冲一次
@@ -703,9 +721,10 @@
       '</div>';
   }
 
-  /* 依据状态构建状态区（此处是各状态动画的“家”） */
+  /* 依据状态构建状态区（此处是各状态动画的“家”）。
+   * 与 updateCard 一致用 effectiveStatus：main 空闲时显示"待机"表情与标签 */
   function buildStatusArea(agent) {
-    const status = normalizeStatus(agent.status);
+    const status = effectiveStatus(agent);
     const meta = STATUS_META[status];
     let extra = '';
     let bar = '';

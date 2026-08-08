@@ -245,6 +245,7 @@ body {
 .agent-card.status-thinking { --sc: var(--thinking); --sc-rgb: var(--thinking-rgb); }
 .agent-card.status-tool     { --sc: var(--tool);     --sc-rgb: var(--tool-rgb); }
 .agent-card.status-asking   { --sc: var(--asking);   --sc-rgb: var(--asking-rgb); }
+.agent-card.status-idle     { --sc: var(--muted);    --sc-rgb: 141, 151, 173; }
 .agent-card.status-done     { --sc: var(--done);     --sc-rgb: var(--done-rgb); }
 .agent-card.status-failed   { --sc: var(--failed);   --sc-rgb: var(--failed-rgb); }
 
@@ -378,7 +379,18 @@ body {
   100% { box-shadow: 0 0 0 0 rgba(var(--sc-rgb), 0); }
 }
 
-/* thinking：三点弹跳 + 边框扫光 */
+/* idle：主 Agent 待机（灰蓝色调，呼吸动画轻缓）。
+ * 仅 main 卡片可能持有 status-idle（见 app.js effectiveStatus） */
+.agent-card.status-idle .card-wrap {
+  animation: idleBreath 3s ease-in-out infinite;
+}
+
+@keyframes idleBreath {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(141, 151, 173, 0); }
+  50%      { box-shadow: 0 0 0 6px rgba(141, 151, 173, 0.1); }
+}
+
+/* thinking：三点弹跳 */
 .dots {
   display: inline-flex;
   align-items: flex-end;
@@ -399,27 +411,6 @@ body {
 @keyframes dotBounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
   30%           { transform: translateY(-7px); opacity: 1; }
-}
-
-/* thinking：扫光越过整卡（伪元素内亮带往复） */
-.agent-card.status-thinking .card-wrap::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(115deg,
-      transparent 42%,
-      rgba(var(--sc-rgb), 0.10) 47%,
-      rgba(255, 255, 255, 0.30) 50%,
-      rgba(var(--sc-rgb), 0.10) 53%,
-      transparent 58%);
-  background-size: 260% 100%;
-  animation: sweepShine 2.1s linear infinite;
-}
-
-@keyframes sweepShine {
-  0%   { background-position: 130% 0; }
-  100% { background-position: -130% 0; }
 }
 
 /* tool：工具名胶囊 + conic-gradient 环形 spinner + 全宽进度条流光 */
