@@ -7,3 +7,6 @@ node_modules/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# 测试截图（根目录）
+test-screenshot.png
