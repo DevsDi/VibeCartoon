@@ -557,6 +557,60 @@ body {
   color: var(--muted);
 }
 
+/* emoji 头部：优先使用系统彩色 emoji 字体（避免回退成黑白字形） */
+.office-head {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+
+/* 头部多层 text（结构见 app.js OFFICE_SVG）：
+ * 默认表情按角色区分：主 Agent 显示戴墨镜酷脸（office-head-active 😎），
+ * 子 Agent 显示翻白眼（office-head-sub 🙄，:not(.is-main) 规则切换）；
+ * 主 Agent 待机（status-idle）切换为打盹表情（office-head-idle）；
+ * 子 Agent 接到任务（task-assigned）切换为"不开心"表情（office-head-sad）；
+ * 子 Agent 完成庆祝 / 挥手拜拜期间、主 Agent 接收任务时切换为开心表情（office-head-happy）。
+ * emoji 是彩色字形，stroke 无效，因此状态差异用显隐切换而非变色。
+ * 表情层优先级（高 → 低）：
+ *   celebrating(😄) > task-assigned(😟) > idle(😴) > 角色默认(主😎/子🙄)。
+ * 同特异性规则按书写顺序生效，故低优先级写在前面、高优先级写在后面；
+ * 高优先级类存在时同时显式隐藏低优先级层，避免多层重叠渲染。 */
+.office-head-idle { display: none; }
+.office-head-sad { display: none; }
+.office-head-happy { display: none; }
+.office-head-sub { display: none; }
+
+/* 角色默认表情：子 Agent（非 main）默认显示 🙄（优先级高于 idle，故写在 idle 之前） */
+.agent-card:not(.is-main) .office-head-active { display: none; }
+.agent-card:not(.is-main) .office-head-sub { display: block; }
+
+/* idle：主 Agent 待机显示 😴 */
+.agent-card.status-idle .office-head-active { display: none; }
+.agent-card.status-idle .office-head-idle { display: block; }
+
+/* 子 Agent 接到任务：显示 😟（优先级高于 idle / 角色默认，写在二者之后） */
+.agent-card.task-assigned .office-head-active { display: none; }
+.agent-card.task-assigned .office-head-idle { display: none; }
+.agent-card.task-assigned .office-head-sub { display: none; }
+.agent-card.task-assigned .office-head-sad { display: block; }
+
+/* 子 Agent done 庆祝（.celebrating）与挥手拜拜（.is-leaving，仅 done 状态挂
+ * .leaving-done 标记，失败不显示开心表情）期间显示 😄（优先级最高：写在 task-assigned 之后）。
+ * 期间同时隐藏 sad / active / sub 层，避免与 task-assigned / 角色默认重叠时双层渲染。 */
+.agent-card.celebrating .office-head-active { display: none; }
+.agent-card.celebrating .office-head-sad { display: none; }
+.agent-card.celebrating .office-head-sub { display: none; }
+.agent-card.celebrating .office-head-happy { display: block; }
+.agent-card.is-leaving.leaving-done .office-head-active { display: none; }
+.agent-card.is-leaving.leaving-done .office-head-sub { display: none; }
+.agent-card.is-leaving.leaving-done .office-head-happy { display: block; }
+
+/* 主 Agent 接收子 Agent 交回文件（.main-receiving，约 2.5s 由 JS 移除）时显示 😄。
+ * 类更多（specificity 更高）且显式隐藏 idle/active/sad 层，
+ * 主 Agent 待机中恰逢接收时优先显示接收表情。 */
+.agent-card.is-main.main-receiving .office-head-active { display: none; }
+.agent-card.is-main.main-receiving .office-head-idle { display: none; }
+.agent-card.is-main.main-receiving .office-head-sad { display: none; }
+.agent-card.is-main.main-receiving .office-head-happy { display: block; }
+
 /* thinking：屏幕缓慢呼吸闪光（模拟思考 / 打字） */
 .agent-card.status-thinking .pc-screen-glow {
   animation: screenThink 1.2s ease-in-out infinite;
@@ -580,16 +634,18 @@ body {
 /* queued：坐着等待，整个场景变暗 */
 .agent-card.status-queued .office-scene { opacity: 0.55; }
 
-/* done：小人变绿 + 右手举起庆祝 */
-.agent-card.status-done .office-head { stroke: var(--done); }
+/* done：小人变绿 + 右手举起庆祝（头部为 emoji 彩色字形，stroke 无效，改用绿色辉光） */
+.agent-card.status-done .office-head {
+  filter: drop-shadow(0 0 3px rgba(var(--done-rgb), 0.85));
+}
 .agent-card.status-done .office-arm-r {
   transform: rotate(-60deg);
   transform-origin: 15px 32px;
 }
 
-/* failed：小人变红 + 头低垂 */
+/* failed：小人变红 + 头低垂（头部为 emoji 彩色字形，stroke 无效，改用红色辉光） */
 .agent-card.status-failed .office-head {
-  stroke: var(--failed);
+  filter: drop-shadow(0 0 3px rgba(var(--failed-rgb), 0.85));
   transform: translateY(2.5px);
 }
 .agent-card.status-failed .office-body { stroke: var(--failed); }
@@ -676,13 +732,25 @@ body {
 
 .stickman-runner {
   position: absolute;
-  width: 26px;
-  height: 34px;
+  width: 44px;
+  height: 58px;
   transition: left 1s ease-in-out, top 1s ease-in-out;
   color: #ffd54f;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
   will-change: left, top;
 }
+
+/* 火柴人 emoji 头部：优先使用系统彩色 emoji 字体 */
+.stick-head {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+
+/* 火柴人头部双层 emoji（结构见 app.js STICKMAN_SVG）：
+ * 派发（toSub）默认显示 😎（主 Agent 派人送文件）；
+ * 交回汇报（backToMain，.flip 镜像翻转）切换为 😄（子 Agent 完成交回）。 */
+.stick-head-report { display: none; }
+.stickman-runner.flip .stick-head-run { display: none; }
+.stickman-runner.flip .stick-head-report { display: block; }
 
 /* 跑回主 Agent 汇报：镜像翻转（面向左） */
 .stickman-runner.flip { transform: scaleX(-1); }

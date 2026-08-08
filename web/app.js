@@ -167,7 +167,11 @@
    * 由 style.css 依据 .stickman-runner.with-doc / .report 控制显隐。 */
   const STICKMAN_SVG =
     '<svg class="stickman" viewBox="0 0 30 40" aria-hidden="true">' +
-      '<circle cx="15" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2.5"/>' +
+      // 头部双层 emoji（font-size 11、y=12，视觉"圆点"大小居中）：
+      // 派发（toSub）显示 😎（主 Agent 派人送文件）；交回汇报（backToMain，.flip）
+      // 切换为 😄（子 Agent 完成交回，与 celebrating 表情呼应），显隐规则见 style.css
+      '<text class="stick-head stick-head-run" x="15" y="12" text-anchor="middle" font-size="11">😎</text>' +
+      '<text class="stick-head stick-head-report" x="15" y="12" text-anchor="middle" font-size="11">😄</text>' +
       '<line x1="15" y1="14" x2="15" y2="26" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="arm-left" x1="15" y1="18" x2="6" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="arm-right" x1="15" y1="18" x2="24" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
@@ -252,7 +256,7 @@
           window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         if (now === 'done' && !reducedMotion) celebrateCard(a.id);
         runStickman('backToMain', a);
-        leaveCard(a.id, now === 'done' && !reducedMotion ? CELEBRATE_MS : 0);
+        leaveCard(a.id, now === 'done' && !reducedMotion ? CELEBRATE_MS : 0, now === 'done');
       }
     });
 
@@ -333,13 +337,15 @@
     stick.style.transition = 'none'; // 位置由 JS 逐帧驱动，禁用 CSS 过渡
     layer.appendChild(stick);
 
-    // 起点/终点：卡片边缘 ±10px 处、卡片垂直中心高度
-    const startX = direction === 'toSub' ? fromRect.right - 10 : fromRect.left + 10;
+    // 起点/终点：卡片边缘 ±20px 处（火柴人放大到 44px 宽后，半宽 22px≈20px，
+    // 到达时身体中心大致对齐卡片边缘）、卡片垂直中心高度
+    const startX = direction === 'toSub' ? fromRect.right - 20 : fromRect.left + 20;
     const startY = fromRect.top + fromRect.height / 2;
-    const endX = direction === 'toSub' ? toRect.left + 10 : toRect.right - 10;
+    const endX = direction === 'toSub' ? toRect.left + 20 : toRect.right - 20;
     const endY = toRect.top + toRect.height / 2;
-    // 跑道内垂直移动的专用 x 通道：紧贴目标卡片外侧 12px（位于两栏之间）
-    const gapX = direction === 'toSub' ? toRect.left - 12 : toRect.right + 12;
+    // 跑道内垂直移动的专用 x 通道：紧贴目标卡片外侧 24px（位于两栏之间，
+    // 与放大后的火柴人半宽匹配，全程不压卡片）
+    const gapX = direction === 'toSub' ? toRect.left - 24 : toRect.right + 24;
     // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
     const runway = direction === 'toSub'
       ? toRect.left - fromRect.right
@@ -377,6 +383,14 @@
         // 交接第一步：子 Agent 办公小人伸手接住文件
         setOfficeFile(el, true);
         el.classList.add('task-delivered');
+        // 表情切换：接到任务 → 😟（"又要干活了"），约 3.5s 后恢复 🧑 开始工作。
+        // 若期间已完成（celebrating/is-leaving，优先级更高显示 😄）则无碍，
+        // 移除时卡若已离场（isConnected 守卫）直接跳过。
+        el.classList.add('task-assigned');
+        window.setTimeout(function () {
+          if (!el.isConnected) return;
+          el.classList.remove('task-assigned');
+        }, 3500);
         const drop = document.createElement('span');
         drop.className = 'task-drop';
         drop.textContent = '📄';
@@ -413,17 +427,20 @@
     }
   }
 
-  /* 主 Agent 接收文件：办公小人手持文件 + 卡片绿色"收到"闪光，约 2.5s 后收回。
+  /* 主 Agent 接收文件：办公小人手持文件 + 卡片绿色"收到"闪光 + 表情切换 😄
+   * （main-receiving 类，见 style.css），约 2.5s 后收回并恢复 🧑。
    * 多个子 Agent 连续汇报时重置计时窗口，避免提前收回。 */
   function mainReceiveFile() {
     const mainEl = getCardElById('main');
     if (!mainEl) return;
     setOfficeFile(mainEl, true);
     mainEl.classList.add('received-flash');
+    mainEl.classList.add('main-receiving');
     if (mainEl._receiveTimer) window.clearTimeout(mainEl._receiveTimer);
     mainEl._receiveTimer = window.setTimeout(function () {
       setOfficeFile(mainEl, false);
       mainEl.classList.remove('received-flash');
+      mainEl.classList.remove('main-receiving');
     }, 2500);
   }
 
@@ -571,12 +588,16 @@
   /* 子 Agent 完成/失败离场：done 时先播庆祝（waveDelay > 0 的等待窗口内挂
    * .celebrating 类，保持手持文件姿势），窗口结束后加 is-leaving 类
    * （CSS 挥手拜拜 → 延迟淡出消失），总时长顺延 waveDelay 后从缓存与 DOM 移除。
+   * done 离场额外挂 .leaving-done（style.css 据此在挥手/淡出期间保持 😄 表情，
+   * 失败卡不加，避免"失败还开心"）；子卡在离场期间不再被 updateCard 更新，
+   * 状态类停留在进入 done 前一刻，故不能依赖 status-done 选择器。
    * 主 Agent（main）常驻左栏，不参与。 */
-  function leaveCard(id, waveDelay) {
+  function leaveCard(id, waveDelay, isDone) {
     const rec = activeCards[id];
     if (!rec || rec.leavingTimer) return;
     const delay = waveDelay || 0;
     rec.el.classList.add('celebrating');
+    if (isDone) rec.el.classList.add('leaving-done');
     rec.leavingTimer = window.setTimeout(function () {
       rec.el.classList.remove('celebrating');
       rec.el.classList.add('is-leaving');
@@ -676,7 +697,19 @@
       // 电脑底座
       '<rect x="38" y="46" width="14" height="3" fill="currentColor" opacity="0.3"/>' +
       // 坐姿小人（头 + 身体 + 手臂伸向键盘）
-      '<circle class="office-head" cx="15" cy="22" r="6" fill="none" stroke="currentColor" stroke-width="2.5"/>' +
+      // 头部为多层 text：默认按角色区分——主 Agent 显示戴墨镜酷脸（office-head-active 😎），
+      // 子 Agent 显示翻白眼（office-head-sub 🙄，由 style.css 的 :not(.is-main) 规则切换）。
+      // status-idle（主 Agent 待机）切换为打盹表情，task-assigned 切换为不开心，
+      // celebrating / main-receiving 切换为开心表情。emoji 字形由状态类控制显隐，无需 JS 改 DOM。
+      '<text class="office-head office-head-active" x="15" y="28" text-anchor="middle" font-size="16">😎</text>' +
+      // 子 Agent 默认表情层：翻白眼（"又让我干活"），仅非 main 卡片显示
+      '<text class="office-head office-head-sub" x="15" y="28" text-anchor="middle" font-size="16">🙄</text>' +
+      '<text class="office-head office-head-idle" x="15" y="28" text-anchor="middle" font-size="16">😴</text>' +
+      // 不开心表情层：子 Agent 接到新任务（task-assigned，约 3.5s）时切换为 😟（"又要干活了"）
+      '<text class="office-head office-head-sad" x="15" y="28" text-anchor="middle" font-size="16">😟</text>' +
+      // 开心表情层：子 Agent 完成庆祝（celebrating）/ 挥手拜拜（is-leaving，仅 done）、
+      // 主 Agent 接收任务（main-receiving）时切换为 😄（显隐规则见 style.css）
+      '<text class="office-head office-head-happy" x="15" y="28" text-anchor="middle" font-size="16">😄</text>' +
       '<line class="office-body" x1="15" y1="28" x2="15" y2="44" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="office-arm-l" x1="15" y1="32" x2="26" y2="38" stroke="currentColor" stroke-width="2"/>' +
       '<line class="office-arm-r" x1="15" y1="32" x2="26" y2="40" stroke="currentColor" stroke-width="2"/>' +
