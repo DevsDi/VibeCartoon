@@ -1,13 +1,12 @@
 # Vibe Agent Dashboard
 
-Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 事件，实时展示主会话与各子 Agent 的工作进度、状态变化与任务交接过程（含火柴人动画与催办提醒），纯本地运行，无外部依赖。
+Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 事件，实时展示主会话与各子 Agent 的工作进度、状态变化与任务交接过程（含火柴人动画），纯本地运行，无外部依赖。
 
 ## 功能特性
 
 - **两栏看板布局**：左侧为「主 Agent」区，右侧为「子 Agent」区。底层是 3 列 CSS Grid（主栏 `380px` + 中间火柴人跑道 + 子栏 `380px`），整体水平居中（容器上限 1440px），随窗口宽度响应式收窄。
 - **完整状态体系**：`queued`（排队中）/ `thinking`（思考中）/ `tool`（调用工具中）/ `asking`（等待输入）/ `done`（已完成）/ `failed`（失败），主 Agent（`main`）常驻左栏且不参与超时回收；任何 Agent 超过 `STALE_MS`（10 分钟）无事件即被服务端回收。
 - **火柴人任务动画**：新子 Agent 出现或主 Agent 补充派发任务时，火柴人手持文件从主 Agent 卡片跑向子 Agent 卡片（toSub，😎）；子 Agent 完成/失败后火柴人跑回主 Agent 汇报（backToMain，done → 😄 带绿勾，failed → 😢 不带勾），并触发「收到 / 驳回」闪光与子卡挥手拜拜离场。首次渲染有 `stickmanSeeded` 守卫，页面刷新不会涌出一堆火柴人。
-- **nudge 催办**：子 Agent 静默超过 5 分钟（`NUDGE_THRESHOLD_MS`）且仍在进行中时，一只红色 🤨 小人从卡片左侧跑过去，并在卡片右上角弹出「🤨 挑眉看你，快点！」气泡；同一子 Agent 催办冷却 5 分钟；`done` / `failed` / `asking` 状态不催办；`prefers-reduced-motion` 用户降级为只弹气泡。
 - **任务名称解析**：`post_tool_use` 按 `tool_response.agentId` 精确配对子 Agent 名称；`pre_tool_use` 中主 Agent 调用 Agent 工具时登记 `pendingDispatch`（LIFO）作为待消费的任务描述；`subagent_start` 按「精确配对 → LIFO 派发描述 → 事件自带 prompt」三级优先级消费。主 Agent 恒显示「主 Agent」。
 - **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。
 - **零运行时依赖**：服务端为纯 Node ESM http server，前端为原生 JS + CSS，无框架、不连外网。
@@ -68,7 +67,8 @@ echo '{"hook":"SubagentStart","subagent_id":"demo-1","agent_type":"general"}' | 
 |---|---|---|
 | `PORT` | `8617` | 看板服务监听端口 |
 | `STALE_MS` | `10 * 60 * 1000`（10 分钟） | Agent 超过该时长无任何事件 → 被回收（主 Agent `main` 豁免） |
-| `MAX_BYTES` | `5 * 1024 * 1024`（5MB） | `events.jsonl` 超过该体积 → 轮转为 `.1` 并新建 |
+| `MAX_BYTES` | `10 * 1024 * 1024`（10MB） | `events.jsonl` 超过该体积 → 轮转为 `.1` 并新建 |
+| `ALLOWED_ORIGIN` | `http://localhost:<PORT>` | CORS 允许来源，可通过同名环境变量覆盖 |
 | `EVENTS_FILE` | `<root>/data/events.jsonl` | 事件文件路径 |
 | `COLLECT_LOG` | `<root>/data/collect.log` | 采集器异常日志路径 |
 | `WEB_DIR` | `<root>/web` | 前端静态资源目录 |
@@ -85,10 +85,10 @@ vc-dashboard/
 │   └── server.mjs          # 无依赖 ESM http server：静态托管 + /api/* 接口 + 状态机聚合
 ├── web/
 │   ├── index.html          # 看板页面结构（标题条 / 空状态 / 两栏看板）
-│   ├── app.js              # 前端逻辑（600ms 轮询 / 卡片渲染 / 火柴人动画 / nudge 催办）
+│   ├── app.js              # 前端逻辑（600ms 轮询 / 卡片渲染 / 火柴人动画）
 │   └── style.css           # 深色主题样式与全部 CSS 动画
 ├── data/                   # 运行期生成（.gitignore）
-│   ├── events.jsonl        # 事件文件（超过 5MB 自动轮转）
+│   ├── events.jsonl        # 事件文件（超过 10MB 自动轮转）
 │   └── collect.log         # 采集器异常日志
 └── tests/                  # E2E 测试（详见 tests/README.md）
     ├── run.mjs             # 测试入口
