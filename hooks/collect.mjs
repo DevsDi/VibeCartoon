@@ -123,8 +123,11 @@ function buildLine(payload) {
   if (tool == null && (hook === "pre_tool_use" || hook === "post_tool_use")) tool = payload.tool_use?.name ?? null;
 
   let status = payload.status ?? payload.result?.status ?? payload.subagent_stop?.status ?? null;
-  // Claude 事件流里 subagent_stop 的成败用 error/status 表达
-  if (status == null && payload.error) status = "error";
+  // 子 agent stop 失败信号：status 为 null 时，从顶层/嵌套 error、success=false 或 message 里宽松提取
+  if (status == null && (payload.error || payload.result?.error || payload.subagent_stop?.error ||
+      payload.success === false || String(payload.message ?? "").includes("error"))) {
+    status = "error";
+  }
 
   let tok = payload.tok;
   if (tok == null && payload.total_tokens != null) tok = payload.total_tokens;

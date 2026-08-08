@@ -48,10 +48,17 @@
         <p class="empty-sub">子 Agent 接入看板后，这里会实时显示每个 Agent 的工作进度。</p>
       </section>
 
-      <!-- 进行中 Agent 卡片网格 -->
+      <!-- 主 Agent（独立分组，全宽大卡片） -->
+      <section id="main-wrap" class="main-wrap hidden">
+        <div class="main-label">主 Agent</div>
+        <div id="main-grid" class="main-agent-grid" aria-label="主 Agent"></div>
+      </section>
+
+      <!-- 进行中子 Agent 卡片网格 -->
       <section id="active-wrap" class="active-wrap hidden">
-        <p id="no-active-note" class="no-active-note hidden">当前没有进行中的 Agent，可展开下方查看已完成任务。</p>
-        <div id="active-grid" class="agent-grid" aria-label="进行中的 Agent"></div>
+        <div class="sub-label">子 Agent</div>
+        <p id="no-active-note" class="no-active-note hidden">当前没有进行中的子 Agent，可展开下方查看已完成任务。</p>
+        <div id="active-grid" class="agent-grid" aria-label="进行中的子 Agent"></div>
       </section>
 
       <!-- 完成 / 失败 折叠区 -->

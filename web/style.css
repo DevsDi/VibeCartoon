@@ -211,12 +211,50 @@ body {
   padding: 10px 0 20px;
 }
 
-/* ---------- 7. 进行中卡片网格 ---------- */
+/* ---------- 7. 分区与卡片网格 ---------- */
 .active-wrap { margin-bottom: 8px; }
+
+.main-wrap { margin-bottom: 20px; }
+
+/* 分组小标题（主 Agent / 子 Agent） */
+.main-label, .sub-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.main-label::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #818cf8, #38bdf8);
+}
+
+.sub-label::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--tool);
+}
 
 .agent-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+/* 主 Agent 独立网格：全宽单列大卡片 */
+.main-agent-grid {
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 16px;
   align-items: start;
 }
@@ -253,6 +291,17 @@ body {
   background: linear-gradient(90deg, var(--sc), rgba(var(--sc-rgb), 0.12));
   opacity: 0.9;
 }
+
+/* 主 Agent 全宽大卡片：更大留白、更粗顶条、更大字号 */
+.main-agent-grid .card-wrap { padding: 22px 26px 20px; }
+.main-agent-grid .accent { height: 4px; }
+.main-agent-grid .card-head { margin-bottom: 14px; }
+.main-agent-grid .agent-id { font-size: 17px; }
+.main-agent-grid .status-emoji { font-size: 24px; }
+.main-agent-grid .status-label { font-size: 17px; }
+.main-agent-grid .meta-line { margin-top: 16px; padding-top: 14px; font-size: 13px; }
+.main-agent-grid .history-title { font-size: 12px; }
+.main-agent-grid .history-pill { font-size: 13px; }
 
 /* ---------- 9. 卡片整体动画：入场 / 状态脉冲 / 移除 ---------- */
 /* 首次出现：1.5s 淡入 + 上浮 */

@@ -87,13 +87,19 @@ async function initReadOffset() {
 // }
 const agents = new Map();
 let lastActiveKey = null; // 供无 agent 归属的 Notification 使用
+// 待消费的子 Agent 名称登记表（agentId → { name, ts }）：
+// post_tool_use 通过 tool_response.agentId 精确登记，subagent_start 按 key 消费，
+// 并行/异步子 Agent 也不会错配（问题2 H1）。
+const agentNames = new Map();
 
 const CLEANUP_INTERVAL = 60 * 1000; // 清理间隔 1 分钟（STALE_MS 统一在 config.mjs）
+const NAME_STALE_MS = 60 * 1000;    // agentNames 未消费条目的过期时限
 
 function newAgent(id, type) {
   return {
     id,
     type: type || "agent",
+    name: null,
     status: null,
     currentTool: null,
     toolCount: 0,
@@ -101,6 +107,7 @@ function newAgent(id, type) {
     endTime: null,
     lastSeen: null,
     history: [],
+    deleteTimer: null, // 生命周期残留删除定时器引用（当前不再创建定时器，保留字段以兼容清理逻辑/防误删）
   };
 }
 
@@ -113,14 +120,19 @@ function pushHistory(a, note) {
 }
 
 // 定时回收超时无事件的 Agent：任何状态（queued/thinking/tool/asking/done/failed），
-// lastSeen 超过 STALE_MS 无更新即回收
+// lastSeen 超过 STALE_MS 无更新即回收。主会话 main 与回收豁免（问题5 M3）。
 function cleanupInactiveAgents() {
   const now = Date.now();
   for (const [key, a] of [...agents]) {
+    if (key === "main") continue; // 主会话绑定长会话上下文，空闲超时不回收，避免掉卡
     const lastSeen = a.lastSeen ? Date.parse(a.lastSeen) : 0;
     if (now - lastSeen > STALE_MS) {
       agents.delete(key);
     }
+  }
+  // 清理 agentNames 中超过 NAME_STALE_MS 仍未消费的登记，避免 agentId 复用导致误配（问题2 第4点）
+  for (const [id, entry] of agentNames) {
+    if (now - entry.ts > NAME_STALE_MS) agentNames.delete(id);
   }
 }
 
@@ -141,11 +153,16 @@ function applyEvent(e) {
     case "subagent_start": {
       let a = agents.get(key);
       if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
+      // 同 key 复活：若存在旧生命周期残留的删除定时器，先取消防止误删新 agent（问题1 H2）
+      if (a.deleteTimer) { clearTimeout(a.deleteTimer); a.deleteTimer = null; }
       if (!a.startTime) a.startTime = rawTs;
       a.type = e.type || a.type || "agent";
       a.status = "queued";
       a.lastSeen = rawTs;
       pushHistory(a, "start");
+      // 消费 post_tool_use 按 agentId 精确登记的名称（并行子 Agent 不会错配，问题2 H1）
+      const entry = agentNames.get(key);
+      if (entry) { a.name = entry.name; agentNames.delete(key); }
       break;
     }
     case "pre_tool_use": {
@@ -156,6 +173,8 @@ function applyEvent(e) {
         a.startTime = rawTs;
         agents.set(key, a);
       }
+      // 同 key 复活：先取消残留删除定时器，防止误删新 agent（问题1 H2）
+      if (a.deleteTimer) { clearTimeout(a.deleteTimer); a.deleteTimer = null; }
       a.status = "tool";
       if (e.tool != null) {
         a.currentTool = String(e.tool);
@@ -163,6 +182,15 @@ function applyEvent(e) {
         pushHistory(a, `tool:${a.currentTool}`);
       } else {
         pushHistory(a, "tool");
+      }
+      // 从 tool_input.description 提取任务描述作为 Agent 名称
+      if (e.detail) {
+        try {
+          const detail = JSON.parse(e.detail);
+          if (detail.tool_input && detail.tool_input.description) {
+            a.name = detail.tool_input.description;
+          }
+        } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
       }
       a.lastSeen = rawTs;
       break;
@@ -177,6 +205,20 @@ function applyEvent(e) {
       a.status = "thinking"; // 思考间隙；当前工具保留显示
       a.lastSeen = rawTs;
       pushHistory(a, "thinking");
+      // Agent 工具调用结束后：从 tool_response 取 agentId + description 精确配对。
+      // subagent_start 已先行 → 直接回填名称；post 先行 → 登记供后续 subagent_start 消费（问题2 H1）。
+      if (e.tool === "Agent" && e.detail) {
+        try {
+          const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+          const agentId = detail.tool_response?.agentId;
+          const desc = detail.tool_response?.description ?? detail.tool_input?.description;
+          if (agentId && desc) {
+            const sub = agents.get(String(agentId));
+            if (sub) sub.name = desc;                        // subagent_start 已先行 → 直接回填
+            agentNames.set(String(agentId), { name: desc, ts: Date.now() }); // post 先行 → 供后续消费
+          }
+        } catch { /* detail 不合法或结构不符，忽略 */ }
+      }
       break;
     }
     case "notification": {
@@ -193,13 +235,28 @@ function applyEvent(e) {
     case "subagent_stop": {
       let a = agents.get(key);
       if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
-      const failed = e.status === "error" || e.status === "failed";
+      // 失败判定：status 与 detail 双重来源。真实 subagent_stop 事件 status 常为 null，
+      // 失败信息可能藏在 detail 中，做宽松匹配（问题4 M2）。
+      let failed = e.status === "error" || e.status === "failed";
+      if (!failed && e.detail) {
+        try {
+          const d = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+          if (d && (
+            d.error ||
+            d.result?.status === "error" ||
+            d.status === "error" ||
+            d.success === false ||
+            String(d.message || "").includes("error")
+          )) failed = true;
+        } catch { /* detail 非 JSON，忽略 */ }
+      }
       a.status = failed ? "failed" : "done";
       a.endTime = rawTs;
       a.lastSeen = rawTs;
       pushHistory(a, failed ? "error" : "done");
-      // 延迟 5 秒后从 agents Map 中移除，让前端有时间显示完成状态
-      setTimeout(() => { agents.delete(key); }, 5000);
+      // 不再 5 秒后立即删除（问题3 M1）：done/failed 结果保留至 cleanupInactiveAgents
+      // 按 STALE_MS（10 分钟）统一回收，折叠区有内容可回看；
+      // 同时"删除定时器误删同 key 新 agent"的隐患也随之消除（问题1 H2）。
       break;
     }
     default:
@@ -331,6 +388,7 @@ function toAgentView(a) {
   return {
     id: a.id,
     type: a.type ?? null,
+    name: a.name ?? null,
     status: a.status,
     currentTool: a.currentTool,
     toolCount: a.toolCount ?? 0,

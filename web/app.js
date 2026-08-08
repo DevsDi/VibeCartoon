@@ -33,7 +33,8 @@
 
   /* ---------------- 内部状态 ---------------- */
   let els = {};                 // 缓存的 DOM 引用
-  let activeCards = {};         // id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
+  let activeCards = {};         // 子 Agent: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
+  let mainCards = {};           // 主 Agent: 同上（渲染到 main-grid 全宽大卡片）
   let finishedSignature = '';   // 折叠区渲染签名，内容没变就不重建（避免动画重启）
   let finishedOpen = true;      // 折叠区默认展开
   let polling = false;          // 轮询互斥锁
@@ -43,6 +44,8 @@
 
   function init() {
     // 收集 DOM
+    els.mainGrid = document.getElementById('main-grid');
+    els.mainWrap = document.getElementById('main-wrap');
     els.activeGrid = document.getElementById('active-grid');
     els.activeWrap = document.getElementById('active-wrap');
     els.emptyState = document.getElementById('empty-state');
@@ -125,13 +128,21 @@
     }
     setEmptyVisible(false);
 
-    // 活动卡片（进行中）与完成/失败（折叠到底部）
-    const active = agents.filter(function (a) {
+    // 拆分：主 Agent（id=main）与子 Agent
+    const mainAgents = agents.filter(function (a) { return a.id === 'main'; });
+    const subAgents = agents.filter(function (a) { return a.id !== 'main'; });
+
+    // 主 Agent 独立网格（顶部全宽）
+    renderMain(mainAgents);
+
+    // 子 Agent 活动卡片（进行中，未折叠）
+    const active = subAgents.filter(function (a) {
       return !FOLDED_STATUS[normalizeStatus(a.status)];
     }).sort(function (a, b) {
       return priorityOf(a) - priorityOf(b);
     });
 
+    // 完成/失败折叠区：主 Agent 与子 Agent 都进入（不破坏原有折叠逻辑）
     const finished = agents.filter(function (a) {
       return FOLDED_STATUS[normalizeStatus(a.status)];
     });
@@ -143,7 +154,33 @@
   /* ---------------- 空状态 ---------------- */
   function setEmptyVisible(show) {
     els.emptyState.classList.toggle('hidden', !show);
+    els.mainWrap.classList.toggle('hidden', show);
     els.activeWrap.classList.toggle('hidden', show);
+  }
+
+  /* ---------------- 主 Agent 卡片（顶部全宽网格） ---------------- */
+  /* 渲染主 Agent（id=main）到 main-grid，复用 createCard/upsertCard/removeActiveCard。
+   * 主 Agent 变为 done/failed 时进入折叠区（renderFinished），此处负责隐藏与清理。 */
+  function renderMain(mainList) {
+    const list = Array.isArray(mainList) ? mainList : [];
+
+    // 无主 Agent：隐藏整个网格，并清空残留卡片（避免隐藏期间遗留旧 DOM）
+    if (!list.length) {
+      els.mainWrap.classList.add('hidden');
+      Object.keys(mainCards).forEach(function (id) { removeActiveCard(id, mainCards); });
+      return;
+    }
+    els.mainWrap.classList.remove('hidden');
+
+    const seen = new Set(list.map(function (a) { return a.id; }));
+
+    // 清理已不在主列表中的旧卡片（例如状态变为 done/failed 被折叠走）
+    Object.keys(mainCards).forEach(function (id) {
+      if (!seen.has(id)) removeActiveCard(id, mainCards);
+    });
+
+    // 更新或新建
+    list.forEach(function (agent) { upsertCard(agent, mainCards, els.mainGrid); });
   }
 
   /* ---------------- 活动卡片网格 ---------------- */
@@ -162,19 +199,23 @@
     active.forEach(function (agent) { upsertCard(agent); });
   }
 
-  function upsertCard(agent) {
-    let rec = activeCards[agent.id];
+  /* 创建卡片：grid 指定目标网格（主 Agent 用 mainGrid），缺省挂到 activeGrid */
+  function upsertCard(agent, cache, grid) {
+    const map = cache || activeCards;
+    let rec = map[agent.id];
     if (!rec) {
-      rec = createCard(agent);
-      activeCards[agent.id] = rec;
+      rec = createCard(agent, grid);
+      map[agent.id] = rec;
     }
     updateCard(rec, agent);
   }
 
-  function removeActiveCard(id) {
-    const rec = activeCards[id];
+  /* 移除卡片：cache 指定所属缓存（主 Agent 用 mainCards），缺省为 activeCards */
+  function removeActiveCard(id, cache) {
+    const map = cache || activeCards;
+    const rec = map[id];
     if (!rec) return;
-    delete activeCards[id];
+    delete map[id];
     rec.el.classList.add('removing');
     window.setTimeout(function () {
       if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
@@ -182,11 +223,12 @@
   }
 
   /* ---------- 创建 / 更新单张卡片 ---------- */
-  function createCard(agent) {
+  /* grid：目标网格元素，缺省挂到 activeGrid（主 Agent 卡片传入 mainGrid） */
+  function createCard(agent, grid) {
     const el = document.createElement('article');
     el.className = 'agent-card enter';
     el.innerHTML = cardShell(agent);
-    els.activeGrid.appendChild(el);
+    (grid || els.activeGrid).appendChild(el);
 
     const rec = {
       el: el,
@@ -240,12 +282,14 @@
   /* 卡片外壳：头部 + 状态区（动态）+ 元信息 + 历史 */
   function cardShell(agent) {
     const type = typeof agent.type === 'string' ? agent.type : 'Agent';
+    var name = typeof agent.name === 'string' && agent.name ? agent.name : type;
+    name = truncate(name, 30);
     return '' +
       '<div class="card-wrap">' +
         '<span class="accent" aria-hidden="true"></span>' +
         '<div class="card-head">' +
           '<span class="agent-id">' + escapeHtml(agent.id) + '</span>' +
-          '<span class="type-badge">' + escapeHtml(type) + '</span>' +
+          '<span class="type-badge">' + escapeHtml(name) + '</span>' +
         '</div>' +
         '<div class="status-area"></div>' +
         '<div class="meta-line">' +
@@ -373,7 +417,9 @@
     const meta = STATUS_META[status];
     const dot = '<span class="fin-dot" aria-hidden="true"></span>';
     const id = '<span class="fin-id">' + escapeHtml(agent.id) + '</span>';
-    const label = '<span class="fin-em">' + meta.emoji + '</span><span>' + meta.label + '</span>';
+    var name = typeof agent.name === 'string' && agent.name ? agent.name : meta.label;
+    name = truncate(name, 30);
+    const label = '<span class="fin-em">' + meta.emoji + '</span><span>' + escapeHtml(name) + '</span>';
 
     let prefix = '';
     if (status === 'done') {
@@ -478,6 +524,12 @@
     return String(str).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  /* 截断字符串，超过 max 长度时加省略号 */
+  function truncate(str, max) {
+    var s = String(str);
+    return s.length > max ? s.slice(0, max) + '...' : s;
   }
 
   /* 完成状态勾号 SVG（stroke-dasharray 绘制动画见 style.css） */
