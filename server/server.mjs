@@ -107,7 +107,6 @@ function newAgent(id, type) {
     endTime: null,
     lastSeen: null,
     history: [],
-    deleteTimer: null, // 生命周期残留删除定时器引用（当前不再创建定时器，保留字段以兼容清理逻辑/防误删）
   };
 }
 
@@ -153,8 +152,6 @@ function applyEvent(e) {
     case "subagent_start": {
       let a = agents.get(key);
       if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
-      // 同 key 复活：若存在旧生命周期残留的删除定时器，先取消防止误删新 agent（问题1 H2）
-      if (a.deleteTimer) { clearTimeout(a.deleteTimer); a.deleteTimer = null; }
       if (!a.startTime) a.startTime = rawTs;
       a.type = e.type || a.type || "agent";
       a.status = "queued";
@@ -162,7 +159,8 @@ function applyEvent(e) {
       pushHistory(a, "start");
       // 消费 post_tool_use 按 agentId 精确登记的名称（并行子 Agent 不会错配，问题2 H1）
       const entry = agentNames.get(key);
-      if (entry) { a.name = entry.name; agentNames.delete(key); }
+      // 仅当尚无名称时消费登记（与 pre_tool_use 的 !a.name 守卫一致），避免覆盖已从 tool_input.description 提取的名称
+      if (entry && !a.name) { a.name = entry.name; agentNames.delete(key); }
       break;
     }
     case "pre_tool_use": {
@@ -173,8 +171,6 @@ function applyEvent(e) {
         a.startTime = rawTs;
         agents.set(key, a);
       }
-      // 同 key 复活：先取消残留删除定时器，防止误删新 agent（问题1 H2）
-      if (a.deleteTimer) { clearTimeout(a.deleteTimer); a.deleteTimer = null; }
       a.status = "tool";
       if (e.tool != null) {
         a.currentTool = String(e.tool);
@@ -183,11 +179,12 @@ function applyEvent(e) {
       } else {
         pushHistory(a, "tool");
       }
-      // 从 tool_input.description 提取任务描述作为 Agent 名称
-      if (e.detail) {
+      // 从 tool_input.description 提取任务描述作为 Agent 名称（仅当尚无名称时，避免覆盖 agentNames 配对的任务描述）
+      if (!a.name && e.detail) {
         try {
-          const detail = JSON.parse(e.detail);
-          if (detail.tool_input && detail.tool_input.description) {
+          // 双兼容：detail 可能是 JSON 字符串或已是对象（与 post_tool_use 写法对齐）
+          const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+          if (detail && detail.tool_input && detail.tool_input.description) {
             a.name = detail.tool_input.description;
           }
         } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
@@ -233,29 +230,28 @@ function applyEvent(e) {
       break;
     }
     case "subagent_stop": {
+      // 防御性：主会话（main）正常不产生 stop 事件；万一出现，跳过 done/failed 标记，避免把主卡永久标记为 ✅/❌
+      if (key === "main") break;
       let a = agents.get(key);
       if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
-      // 失败判定：status 与 detail 双重来源。真实 subagent_stop 事件 status 常为 null，
-      // 失败信息可能藏在 detail 中，做宽松匹配（问题4 M2）。
+      // 失败判定：只信任结构化字段（status / detail.error / result.status / success）。
+      // 不做 message 文本匹配——成功结果的文本里也可能出现 "error" 字样
+      // （如 "fixed the error"、"no errors found"），文本匹配会误判（问题4 M2 回退）。
       let failed = e.status === "error" || e.status === "failed";
       if (!failed && e.detail) {
         try {
           const d = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-          if (d && (
-            d.error ||
-            d.result?.status === "error" ||
-            d.status === "error" ||
-            d.success === false ||
-            String(d.message || "").includes("error")
-          )) failed = true;
-        } catch { /* detail 非 JSON，忽略 */ }
+          if (d && (d.error || d.result?.status === "error" || d.status === "error" || d.success === false)) {
+            failed = true;
+          }
+        } catch { /* detail 不合法，忽略 */ }
       }
       a.status = failed ? "failed" : "done";
       a.endTime = rawTs;
       a.lastSeen = rawTs;
       pushHistory(a, failed ? "error" : "done");
       // 不再 5 秒后立即删除（问题3 M1）：done/failed 结果保留至 cleanupInactiveAgents
-      // 按 STALE_MS（10 分钟）统一回收，折叠区有内容可回看；
+      // 按 STALE_MS（10 分钟）统一回收；
       // 同时"删除定时器误删同 key 新 agent"的隐患也随之消除（问题1 H2）。
       break;
     }

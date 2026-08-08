@@ -123,9 +123,10 @@ function buildLine(payload) {
   if (tool == null && (hook === "pre_tool_use" || hook === "post_tool_use")) tool = payload.tool_use?.name ?? null;
 
   let status = payload.status ?? payload.result?.status ?? payload.subagent_stop?.status ?? null;
-  // 子 agent stop 失败信号：status 为 null 时，从顶层/嵌套 error、success=false 或 message 里宽松提取
+  // 子 agent stop 失败信号：status 为 null 时，仅凭结构化失败信号判定（顶层/嵌套 error 字段存在、success === false）。
+  // 禁止 message 文本匹配——成功结果的文本里出现 "error" 字样（如 "fixed the error"）会被误判为失败。
   if (status == null && (payload.error || payload.result?.error || payload.subagent_stop?.error ||
-      payload.success === false || String(payload.message ?? "").includes("error"))) {
+      payload.success === false)) {
     status = "error";
   }
 

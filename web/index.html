@@ -23,17 +23,6 @@
         <h1 class="brand-title">Vibe <span class="brand-accent">Agent</span> Dashboard</h1>
         <p class="brand-subtitle">Claude Code 各 Agent 工作进度</p>
       </div>
-
-      <!-- 实时 summary 徽章 -->
-      <div class="summary" id="summary">
-        <span class="sum-badge b-total"><span class="sum-label">总数</span><span class="sum-value" id="sum-total">0</span></span>
-        <span class="sum-badge b-active"><span class="sum-label">进行中</span><span class="sum-value" id="sum-active">0</span></span>
-        <span class="sum-badge b-queued"><span class="sum-label">排队</span><span class="sum-value" id="sum-queued">0</span></span>
-        <span class="sum-badge b-thinking"><span class="sum-label">思考</span><span class="sum-value" id="sum-thinking">0</span></span>
-        <span class="sum-badge b-tool"><span class="sum-label">工具</span><span class="sum-value" id="sum-tool">0</span></span>
-        <span class="sum-badge b-done"><span class="sum-label">完成</span><span class="sum-value" id="sum-done">0</span></span>
-        <span class="sum-badge b-failed"><span class="sum-label">失败</span><span class="sum-value" id="sum-failed">0</span></span>
-      </div>
     </div>
   </header>
 
@@ -45,30 +34,20 @@
       <section id="empty-state" class="empty-state">
         <div class="empty-icon" aria-hidden="true">🧊</div>
         <h2 class="empty-title">暂无 Agent 活动</h2>
-        <p class="empty-sub">子 Agent 接入看板后，这里会实时显示每个 Agent 的工作进度。</p>
+        <p class="empty-sub">Agent 接入看板后，这里会实时显示每个 Agent 的工作进度。</p>
       </section>
 
-      <!-- 主 Agent（独立分组，全宽大卡片） -->
-      <section id="main-wrap" class="main-wrap hidden">
-        <div class="main-label">主 Agent</div>
-        <div id="main-grid" class="main-agent-grid" aria-label="主 Agent"></div>
-      </section>
-
-      <!-- 进行中子 Agent 卡片网格 -->
-      <section id="active-wrap" class="active-wrap hidden">
-        <div class="sub-label">子 Agent</div>
-        <p id="no-active-note" class="no-active-note hidden">当前没有进行中的子 Agent，可展开下方查看已完成任务。</p>
-        <div id="active-grid" class="agent-grid" aria-label="进行中的子 Agent"></div>
-      </section>
-
-      <!-- 完成 / 失败 折叠区 -->
-      <section id="finished-section" class="finished-section hidden">
-        <div id="finished-head" class="finished-head" role="button" tabindex="0" aria-expanded="true">
-          <span class="finished-title">已完成 / 失败</span>
-          <span class="finished-count" id="finished-count">0</span>
-          <span class="chevron" id="finished-chevron" aria-hidden="true">▾</span>
+      <!-- 看板主区：左主 Agent + 右子 Agent（一列多行） -->
+      <section id="board-wrap" class="board-wrap hidden">
+        <div class="board-left">
+          <div class="board-left-title">主 Agent</div>
+          <div id="main-grid" class="main-agent-grid" aria-label="主 Agent"></div>
         </div>
-        <div id="finished-list" class="finished-list"></div>
+        <div class="board-right">
+          <div class="board-right-title">子 Agent</div>
+          <p id="no-active-note" class="no-active-note hidden">当前没有进行中的子 Agent。</p>
+          <div id="active-grid" class="agent-grid" aria-label="子 Agent"></div>
+        </div>
       </section>
 
     </div>

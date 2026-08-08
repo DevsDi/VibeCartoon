@@ -3,7 +3,8 @@
  * 原生 JS，无框架、无依赖、不连外网。
  * 职责：每 600ms 轮询 /api/state，
  *       增量刷新 Agent 卡片（保证动画不因重绘重置），
- *       处理完成/失败折叠、断连横幅与空状态占位。
+ *       处理子 Agent 完成/失败拜拜离场、断连横幅与空状态占位，
+ *       播放任务派发/汇报的火柴人过渡动画。
  * ========================================================================= */
 'use strict';
 
@@ -25,57 +26,53 @@
     unknown:  { emoji: '🌀', label: '未知状态' }
   };
 
-  /* 折叠到“底部紧凑列表”的状态 */
+  /* 折叠到"底部紧凑列表"的状态：子 Agent 完成/失败后不再进折叠区，
+   * 而是播放"拜拜"（挥手 + 淡出）动画后消失（见 leaveCard） */
   const FOLDED_STATUS = { done: true, failed: true };
+
+  /* 子 Agent 完成/失败后的离场动画时长（毫秒）：
+   * 挥手拜拜 4s → 淡出 3s → 由 JS 移除 DOM */
+  const LEAVE_WAVE_MS = 4000;
+  const LEAVE_FADE_MS = 3000;
+  const LEAVE_TOTAL_MS = LEAVE_WAVE_MS + LEAVE_FADE_MS + 100;
+
+  /* 子 Agent 完成（done）庆祝时长：粒子散开播放完，才进入挥手拜拜 */
+  const CELEBRATE_MS = 1800;
 
   /* 活动卡片网格内的排序优先级：越靠前越优先 */
   const ACTIVE_PRIORITY = { asking: 0, tool: 1, thinking: 2, queued: 3, running: 4, unknown: 5 };
 
   /* ---------------- 内部状态 ---------------- */
   let els = {};                 // 缓存的 DOM 引用
-  let activeCards = {};         // 子 Agent: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
-  let mainCards = {};           // 主 Agent: 同上（渲染到 main-grid 全宽大卡片）
-  let finishedSignature = '';   // 折叠区渲染签名，内容没变就不重建（避免动画重启）
-  let finishedOpen = true;      // 折叠区默认展开
+  let mainCards = {};           // 主 Agent（id=main）卡片缓存（main-grid）: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
+  let activeCards = {};         // 子 Agent 卡片缓存（active-grid）: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
   let polling = false;          // 轮询互斥锁
+  let prevAgentMap = new Map(); // 全部 Agent: id -> 上次渲染时的状态（用于检测新出现/完成）
+  let stickmanSeeded = false;   // 首次渲染是否已建立基准（首次不触发火柴人动画）
+  let lastMainAgentCallCount = 0; // main 的 history 中派发/补充任务工具调用（Agent/SendMessage）累计次数基准
 
   /* ---------------- 启动 ---------------- */
   document.addEventListener('DOMContentLoaded', init);
 
   function init() {
     // 收集 DOM
+    els.boardWrap = document.getElementById('board-wrap');
     els.mainGrid = document.getElementById('main-grid');
-    els.mainWrap = document.getElementById('main-wrap');
     els.activeGrid = document.getElementById('active-grid');
-    els.activeWrap = document.getElementById('active-wrap');
     els.emptyState = document.getElementById('empty-state');
     els.noActiveNote = document.getElementById('no-active-note');
-    els.finishedSection = document.getElementById('finished-section');
-    els.finishedHead = document.getElementById('finished-head');
-    els.finishedCount = document.getElementById('finished-count');
-    els.finishedList = document.getElementById('finished-list');
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
-    els.summary = {};
-    ['total', 'active', 'queued', 'thinking', 'tool', 'done', 'failed'].forEach(function (k) {
-      els.summary[k] = document.getElementById('sum-' + k);
-    });
 
-    // 折叠区交互（按钮语义）
-    els.finishedHead.addEventListener('click', toggleFinished);
-    els.finishedHead.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        toggleFinished();
-      }
-    });
+    // 火柴人动画层：固定定位覆盖全屏，挂在 body 末尾，不参与布局
+    els.animLayer = document.createElement('div');
+    els.animLayer.id = 'anim-layer';
+    els.animLayer.className = 'anim-layer';
+    els.animLayer.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(els.animLayer);
 
     // 初始空状态
     setEmptyVisible(true);
-    els.finishedSection.classList.add('hidden');
-    // 折叠区默认展开（紧凑行 + 勾号/抖动动画可见）
-    els.finishedSection.classList.add('open');
-    els.finishedList.classList.remove('hidden');
 
     // 立即拉取一次，然后按固定间隔轮询
     poll();
@@ -117,118 +114,485 @@
   /* ---------------- 主渲染 ---------------- */
   function render(data) {
     const agents = Array.isArray(data.agents) ? data.agents : [];
-    renderSummary(data.summary || {});
     renderFooter(data.updatedAt);
 
-    // 无任何 Agent：展示空状态占位
+    // 无任何 Agent：展示空状态占位；同时清空旧卡片缓存与 DOM，
+    // 避免服务端重启（agents 清空）后旧卡片残留、新事件到来时"复活"
     if (!agents.length) {
       setEmptyVisible(true);
-      renderFinished([]);
+      clearAllCards();           // 清空 mainCards/activeCards 缓存 + 移除两网格下所有 .agent-card
+      prevAgentMap = new Map();  // 清空基准快照：新 Agent 再出现时视为"新出现"触发动画
       return;
     }
     setEmptyVisible(false);
 
-    // 拆分：主 Agent（id=main）与子 Agent
-    const mainAgents = agents.filter(function (a) { return a.id === 'main'; });
-    const subAgents = agents.filter(function (a) { return a.id !== 'main'; });
+    // 拆分主 Agent 与子 Agent：主 Agent（id=main）常驻左栏 main-grid（任何状态都不消失），
+    // 子 Agent 渲染到右栏 active-grid（一列多行）
+    const mainList = agents.filter(function (a) { return a.id === 'main'; });
+    const subList = agents.filter(function (a) { return a.id !== 'main'; });
 
-    // 主 Agent 独立网格（顶部全宽）
-    renderMain(mainAgents);
-
-    // 子 Agent 活动卡片（进行中，未折叠）
-    const active = subAgents.filter(function (a) {
-      return !FOLDED_STATUS[normalizeStatus(a.status)];
+    const mainActive = mainList; // 常驻：不做 done/failed 过滤
+    const subActive = subList.filter(function (a) {
+      return !FOLDED_STATUS[normalizeStatus(a.status)]; // 完成/失败的子 Agent 走拜拜消失，不进活动区
     }).sort(function (a, b) {
       return priorityOf(a) - priorityOf(b);
     });
 
-    // 完成/失败折叠区：主 Agent 与子 Agent 都进入（不破坏原有折叠逻辑）
-    const finished = agents.filter(function (a) {
-      return FOLDED_STATUS[normalizeStatus(a.status)];
+    // 子 Agent 区提示：没有进行中的子 Agent 时显示
+    els.noActiveNote.classList.toggle('hidden', subActive.length > 0);
+
+    // 本轮各 Agent 状态快照：renderActive 清理与 animateAgentChanges 共用，
+    // 保证"刚完成/失败"的判定一致（避免清理路径抢先触发离场、破坏庆祝时序）
+    const nowStatus = new Map(agents.map(function (a) {
+      return [a.id, normalizeStatus(a.status)];
+    }));
+
+    renderMain(mainActive);
+    renderActive(subActive, activeCards, els.activeGrid, nowStatus);
+
+    // 火柴人任务动画：放在渲染之后检测，此时新卡片已进 DOM、坐标可读
+    animateAgentChanges(agents, nowStatus);
+  }
+
+  /* ---------------- 火柴人任务动画 ---------------- */
+  /* 任务派发时火柴人从主 Agent 卡片跑向子 Agent 卡片；任务完成后跑回来汇报。
+   * 纯 CSS 走路动画（腿部交替摆动），JS 只负责创建元素与驱动 left/top 过渡。 */
+
+  /* 火柴人 SVG（内联字符串，挂在 .stickman-runner 内，颜色跟随 currentColor）。
+   * doc（派发时拿的文件）与 report-mark（汇报带回的绿勾）默认隐藏，
+   * 由 style.css 依据 .stickman-runner.with-doc / .report 控制显隐。 */
+  const STICKMAN_SVG =
+    '<svg class="stickman" viewBox="0 0 30 40" aria-hidden="true">' +
+      '<circle cx="15" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line x1="15" y1="14" x2="15" y2="26" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="arm-left" x1="15" y1="18" x2="6" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="arm-right" x1="15" y1="18" x2="24" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="leg-left" x1="15" y1="26" x2="7" y2="36" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="leg-right" x1="15" y1="26" x2="23" y2="36" stroke="currentColor" stroke-width="2.5"/>' +
+      // 派发时手里拿的文件（画在右手上方）
+      '<rect class="doc" x="22" y="4" width="6" height="9" rx="1" fill="#e7eaf3" opacity="0"/>' +
+      '<line class="doc-line" x1="24" y1="7" x2="26" y2="7" stroke="#8d97ad" stroke-width="1" opacity="0"/>' +
+      '<line class="doc-line" x1="24" y1="9" x2="26" y2="9" stroke="#8d97ad" stroke-width="1" opacity="0"/>' +
+      // 汇报时带回的绿色勾标（手右侧小圆点）
+      '<circle class="report-mark" cx="25" cy="6" r="3.4" fill="#22c55e" opacity="0"/>' +
+    '</svg>';
+
+  /* main 卡片不存在时（main 未出现时）的起点/终点占位：页面左上角附近 */
+  const FALLBACK_MAIN_RECT = { left: 0, top: 56, right: 8, height: 40 };
+
+  /* main 的 history 中派发/补充子 Agent 任务的工具调用累计次数：
+   * Agent（派发新任务）与 SendMessage（给运行中的子 Agent 补充任务）
+   * 都会让主 Agent 向子 Agent 派人送文件，都应触发派发动画 */
+  function mainAgentCallCount(agents) {
+    const mainAgent = agents.find(function (a) { return a.id === 'main'; });
+    if (!mainAgent || !Array.isArray(mainAgent.history)) return 0;
+    return mainAgent.history.filter(function (h) {
+      return h === 'tool:Agent' || h === 'tool:SendMessage';
+    }).length;
+  }
+
+  /* 检测新子 Agent / 主 Agent 补充任务 / 完成失败状态变化，驱动火柴人往返动画。
+   * nowMap 由 render() 统一构建（与 renderActive 清理共用同一份状态快照）。 */
+  function animateAgentChanges(agents, nowMap) {
+    if (!nowMap) {
+      nowMap = new Map(agents.map(function (a) {
+        return [a.id, normalizeStatus(a.status)];
+      }));
+    }
+
+    // 首次渲染：只建立基准快照，不触发动画（避免刷新页面时一堆火柴人涌出）
+    if (!stickmanSeeded) {
+      stickmanSeeded = true;
+      prevAgentMap = nowMap;
+      lastMainAgentCallCount = mainAgentCallCount(agents);
+      return;
+    }
+
+    // 新子 Agent 出现 → 火柴人从主 Agent 跑过去 + 卡片顶部"新任务"闪烁标记
+    const toSubThisRound = new Set(); // 本轮已派过火柴人的子 Agent（补充派发去重用）
+    agents.forEach(function (a) {
+      if (a.id !== 'main' && !prevAgentMap.has(a.id)) {
+        toSubThisRound.add(a.id);
+        runStickman('toSub', a);
+        showNewTaskTag(a.id); // C：新任务标记
+      }
     });
 
-    renderActive(active);
-    renderFinished(finished);
+    // 主 Agent 补充/再次派发任务（main 的 history 新增 tool:Agent）→ 同样派火柴人送文件。
+    // 目标：最近活跃（lastSeen 最新）的现有子 Agent；本轮刚出现的子 Agent 已派过，跳过
+    if (mainAgentCallCount(agents) > lastMainAgentCallCount) {
+      let target = null;
+      agents.forEach(function (a) {
+        if (a.id === 'main' || toSubThisRound.has(a.id)) return;
+        if (!target || (a.lastSeen || '') > (target.lastSeen || '')) target = a;
+      });
+      if (target) {
+        runStickman('toSub', target);
+        showNewTaskTag(target.id);
+      }
+    }
+    lastMainAgentCallCount = mainAgentCallCount(agents);
+
+    // 子 Agent 完成/失败 → 火柴人跑回主 Agent 汇报 + 卡片挥手拜拜后淡出消失
+    agents.forEach(function (a) {
+      if (a.id === 'main') return;
+      const prev = prevAgentMap.get(a.id);
+      const now = nowMap.get(a.id);
+      if (prev && prev !== 'done' && prev !== 'failed' &&
+          (now === 'done' || now === 'failed')) {
+        // 交接第二步：子 Agent 办公小人拿起文件 → 火柴人（持文件）跑回主 Agent 汇报
+        setOfficeFile(getCardElById(a.id), true);
+        // 完成庆祝（仅 done）：粒子散开 ~1.8s 后才进入挥手拜拜；
+        // 失败不庆祝（保留 ❌ 抖动）；动效敏感用户跳过庆祝与延时
+        const reducedMotion = window.matchMedia &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (now === 'done' && !reducedMotion) celebrateCard(a.id);
+        runStickman('backToMain', a);
+        leaveCard(a.id, now === 'done' && !reducedMotion ? CELEBRATE_MS : 0);
+      }
+    });
+
+    prevAgentMap = nowMap;
+  }
+
+  /* 缓动：ease-in-out（二次贝塞尔近似） */
+  function easeInOut(p) {
+    return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+  }
+
+  /* 火柴人位置驱动：16ms 定时器逐帧插值，逐段 ease-in-out。
+   * 不依赖 CSS transition / requestAnimationFrame（低帧率或节流环境下也稳定）。
+   * path: [{ x, y, dur }, ...] 依次经过的路径点（首点为起点，dur 为到达该点的用时）；
+   * totalMs 结束后停止并移除火柴人。 */
+  function driveStickman(stick, path, totalMs) {
+    const t0 = Date.now();
+    const step = function () {
+      const t = Math.min(Date.now() - t0, totalMs);
+      // 定位当前所在路径段
+      let acc = 0;
+      let seg = -1;
+      for (let i = 0; i + 1 < path.length; i++) {
+        if (t <= acc + path[i + 1].dur) { seg = i; break; }
+        acc += path[i + 1].dur;
+      }
+      if (seg === -1) {
+        const last = path[path.length - 1];
+        stick.style.left = last.x + 'px';
+        stick.style.top = last.y + 'px';
+        return;
+      }
+      const from = path[seg];
+      const to = path[seg + 1];
+      const p = to.dur > 0 ? easeInOut(Math.max(0, Math.min(1, (t - acc) / to.dur))) : 1;
+      stick.style.left = (from.x + (to.x - from.x) * p) + 'px';
+      stick.style.top = (from.y + (to.y - from.y) * p) + 'px';
+    };
+    step();
+    const timer = window.setInterval(step, 16);
+    window.setTimeout(function () {
+      window.clearInterval(timer);
+      if (stick.parentNode) stick.parentNode.removeChild(stick);
+    }, totalMs + 100);
+  }
+
+  /* direction: 'toSub'（主 → 子）| 'backToMain'（子 → 主）
+   * 三段式路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有宽阔跑道（列间 gap 100px）。
+   * 火柴人先水平穿过跑道 → 在跑道内垂直移动到目标卡片中心高度 → 水平切入/切出卡片边缘，
+   * 全程不与其他卡片重叠；窄屏单栏（两栏间距 < 30px）时退化为直线过渡。 */
+  function runStickman(direction, agent) {
+    const layer = els.animLayer;
+    if (!layer || !agent || agent.id === 'main') return;
+    // 动效敏感用户：直接不创建火柴人（style.css 另有全局降级）
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    // 主 Agent 在左栏 main-grid、子 Agent 在右栏 active-grid，统一用 getCardElById 取卡片
+    // （main 未出现时返回 null，走 FALLBACK_MAIN_RECT 占位）
+    const fromEl = direction === 'toSub' ? getCardElById('main') : getCardElById(agent.id);
+    const toEl = direction === 'toSub' ? getCardElById(agent.id) : getCardElById('main');
+
+    let fromRect, toRect;
+    if (direction === 'toSub') {
+      if (!toEl) return; // 子 Agent 卡片还不存在（如首帧即 done/failed）→ 无法到达
+      fromRect = fromEl ? fromEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
+      toRect = toEl.getBoundingClientRect();
+    } else {
+      if (!fromEl) return; // 子 Agent 卡片已被移出 DOM → 无法出发
+      fromRect = fromEl.getBoundingClientRect();
+      toRect = toEl ? toEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
+    }
+
+    // 创建火柴人：跑回来时镜像翻转（面向左）+ 带回汇报绿勾 + 手里拿着交接的文件
+    // （.doc 文件随 with-doc 显形；派发时同样持文件）
+    const stick = document.createElement('div');
+    stick.className = 'stickman-runner' + (direction === 'backToMain' ? ' flip report with-doc' : ' with-doc');
+    stick.innerHTML = STICKMAN_SVG;
+    stick.style.transition = 'none'; // 位置由 JS 逐帧驱动，禁用 CSS 过渡
+    layer.appendChild(stick);
+
+    // 起点/终点：卡片边缘 ±10px 处、卡片垂直中心高度
+    const startX = direction === 'toSub' ? fromRect.right - 10 : fromRect.left + 10;
+    const startY = fromRect.top + fromRect.height / 2;
+    const endX = direction === 'toSub' ? toRect.left + 10 : toRect.right - 10;
+    const endY = toRect.top + toRect.height / 2;
+    // 跑道内垂直移动的专用 x 通道：紧贴目标卡片外侧 12px（位于两栏之间）
+    const gapX = direction === 'toSub' ? toRect.left - 12 : toRect.right + 12;
+    // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
+    const runway = direction === 'toSub'
+      ? toRect.left - fromRect.right
+      : fromRect.left - toRect.right;
+
+    let totalMs;
+    if (runway >= 30) {
+      // 两栏布局：水平(1.8s) → 垂直(2.4s) → 水平(0.8s) 三段式，全程在跑道内
+      // （派发 toSub 与汇报 backToMain 共用本路径；用户要求派发总时长 5s）
+      const PH1 = 1800, PH2 = 2400, PH3 = 800;
+      totalMs = PH1 + PH2 + PH3;
+      driveStickman(stick, [
+        { x: startX, y: startY, dur: 0 },
+        { x: gapX,   y: startY, dur: PH1 },
+        { x: gapX,   y: endY,   dur: PH2 },
+        { x: endX,   y: endY,   dur: PH3 }
+      ], totalMs);
+    } else {
+      // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s，与两栏节奏接近）
+      totalMs = 5000;
+      driveStickman(stick, [
+        { x: startX, y: startY, dur: 0 },
+        { x: endX,   y: endY,   dur: totalMs }
+      ], totalMs);
+    }
+
+    // 派发动画（toSub）到达终点：子 Agent 办公小人接住文件 + 送达闪光 + 放下文件。
+    // totalMs 时刻火柴人正好到达目标卡片边缘，此刻把文件"传递"给子卡小人
+    // （.has-file：手臂前伸 + 文件浮现），并落一个 📄 闪一下边框，短暂停留后移除，
+    // 让用户明确看到"任务送到了子 Agent"。
+    if (direction === 'toSub') {
+      window.setTimeout(function () {
+        const el = getCardElById(agent.id);
+        if (!el) return; // 卡片已被移除（如离场动画中）→ 跳过送达效果
+        // 交接第一步：子 Agent 办公小人伸手接住文件
+        setOfficeFile(el, true);
+        el.classList.add('task-delivered');
+        const drop = document.createElement('span');
+        drop.className = 'task-drop';
+        drop.textContent = '📄';
+        el.appendChild(drop);
+        window.setTimeout(function () {
+          el.classList.remove('task-delivered');
+          if (drop.parentNode) drop.parentNode.removeChild(drop);
+        }, 900);
+        // 送达效果结束（2.5s）后收回文件，工作期间保持干净；
+        // 若期间已完成/失败（正在庆祝 celebrating / 离场 is-leaving）则保留文件——
+        // 那正是"拿起文件出发"的状态
+        window.setTimeout(function () {
+          if (el.classList.contains('is-leaving') || el.classList.contains('celebrating')) return;
+          setOfficeFile(el, false);
+        }, 2500);
+      }, totalMs);
+    } else if (direction === 'backToMain') {
+      // 交接第三步：火柴人到达主 Agent → 主 Agent 办公小人接住文件 + 绿色"收到"闪光
+      window.setTimeout(mainReceiveFile, totalMs);
+    }
+  }
+
+  /* 任务交接：给卡片办公小人加/去"手持文件"状态。
+   * has=true：SVG 场景加 .has-file（CSS 驱动右手臂前伸 + 文件浮现），
+   *            并保证场景内有文件元素（没有则创建一次）；
+   * has=false：收回手臂、隐藏文件（元素保留，避免反复创建）。 */
+  function setOfficeFile(cardEl, has) {
+    if (!cardEl) return;
+    const scene = cardEl.querySelector('.office-scene');
+    if (!scene) return;
+    scene.classList.toggle('has-file', has);
+    if (has && !scene.querySelector('.office-file')) {
+      scene.insertAdjacentHTML('beforeend', OFFICE_FILE_SVG);
+    }
+  }
+
+  /* 主 Agent 接收文件：办公小人手持文件 + 卡片绿色"收到"闪光，约 2.5s 后收回。
+   * 多个子 Agent 连续汇报时重置计时窗口，避免提前收回。 */
+  function mainReceiveFile() {
+    const mainEl = getCardElById('main');
+    if (!mainEl) return;
+    setOfficeFile(mainEl, true);
+    mainEl.classList.add('received-flash');
+    if (mainEl._receiveTimer) window.clearTimeout(mainEl._receiveTimer);
+    mainEl._receiveTimer = window.setTimeout(function () {
+      setOfficeFile(mainEl, false);
+      mainEl.classList.remove('received-flash');
+    }, 2500);
+  }
+
+  /* 子 Agent 完成庆祝：卡片顶部散开彩带/星星粒子（CSS 动画沿 --dx/--dy/--rot
+   * 随机轨迹飞散），约 CELEBRATE_MS 后自动移除。仅 done 调用；动效敏感用户跳过。 */
+  const CELEBRATE_EMOJI = ['🎉', '✨', '⭐', '🎊', '💫'];
+  function celebrateCard(id) {
+    const el = getCardElById(id);
+    if (!el) return;
+    const particles = [];
+    for (let i = 0; i < 8; i++) {
+      const sp = document.createElement('span');
+      sp.className = 'celebrate-particle';
+      sp.textContent = CELEBRATE_EMOJI[i % CELEBRATE_EMOJI.length];
+      // 每个粒子随机：水平 ±110px、向上 50~180px、旋转 ±180°、大小、起播延迟
+      const dx = Math.random() * 220 - 110;
+      const dy = -(Math.random() * 130 + 50);
+      sp.style.setProperty('--dx', dx.toFixed(0) + 'px');
+      sp.style.setProperty('--dy', dy.toFixed(0) + 'px');
+      sp.style.setProperty('--rot', (Math.random() * 360 - 180).toFixed(0) + 'deg');
+      sp.style.left = (30 + Math.random() * 40) + '%';
+      sp.style.fontSize = (12 + Math.random() * 10) + 'px';
+      sp.style.animationDelay = (Math.random() * 0.35) + 's';
+      el.appendChild(sp);
+      particles.push(sp);
+    }
+    window.setTimeout(function () {
+      particles.forEach(function (sp) {
+        if (sp.parentNode) sp.parentNode.removeChild(sp);
+      });
+    }, CELEBRATE_MS + 500);
+  }
+
+  /* 新子 Agent 卡片顶部闪烁"新任务"标记（C 方案）：
+   * 在 type-badge 旁插入 .new-task-tag，约 2.2s 后移除（CSS 负责闪烁动画）。 */
+  function showNewTaskTag(id) {
+    const el = getCardElById(id);
+    if (!el) return;
+    const badge = document.createElement('span');
+    badge.className = 'new-task-tag';
+    badge.textContent = '新任务';
+    const badgeSlot = el.querySelector('.type-badge');
+    if (badgeSlot) badgeSlot.after(badge);
+    window.setTimeout(function () {
+      if (badge.parentNode) badge.parentNode.removeChild(badge);
+    }, 2200);
+  }
+
+  /* Agent 卡片元素：已完成/失败被移出活动区后返回 null，调用方自行跳过。
+   * 主 Agent（id=main）缓存在 mainCards（左栏 main-grid），子 Agent 缓存在
+   * activeCards（右栏 active-grid）；两个缓存都未命中时再按卡片 data-id
+   * 兜底扫描两个网格——卡片刚被移出缓存但仍在 DOM 的 removing/离场动画
+   * 窗口内也能定位到，保证"汇报跑回"动画可出发。 */
+  function getCardElById(id) {
+    const rec = mainCards[id] || activeCards[id];
+    if (rec) return rec.el;
+    const grids = [els.mainGrid, els.activeGrid];
+    for (let g = 0; g < grids.length; g++) {
+      const grid = grids[g];
+      if (!grid) continue;
+      const cards = grid.querySelectorAll('.agent-card');
+      for (let i = 0; i < cards.length; i++) {
+        if (cards[i].dataset && cards[i].dataset.id === id) return cards[i];
+      }
+    }
+    return null;
   }
 
   /* ---------------- 空状态 ---------------- */
   function setEmptyVisible(show) {
     els.emptyState.classList.toggle('hidden', !show);
-    els.mainWrap.classList.toggle('hidden', show);
-    els.activeWrap.classList.toggle('hidden', show);
+    els.boardWrap.classList.toggle('hidden', show);
   }
 
-  /* ---------------- 主 Agent 卡片（顶部全宽网格） ---------------- */
-  /* 渲染主 Agent（id=main）到 main-grid，复用 createCard/upsertCard/removeActiveCard。
-   * 主 Agent 变为 done/failed 时进入折叠区（renderFinished），此处负责隐藏与清理。 */
-  function renderMain(mainList) {
-    const list = Array.isArray(mainList) ? mainList : [];
+  /* 全量清空：移除 main-grid / active-grid 下所有 Agent 卡片 DOM，并重置
+   * mainCards / activeCards 缓存。
+   * 仅"无任何 Agent"的空状态调用（服务端重启/清空后旧卡片必须消失）。
+   * 残留的离场/闪烁定时器到期后都有 parentNode / 缓存引用守卫，不会误删新卡。 */
+  function clearAllCards() {
+    [mainCards, activeCards].forEach(function (cache) {
+      Object.keys(cache).forEach(function (id) {
+        const rec = cache[id];
+        if (rec && rec.el && rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+      });
+    });
+    mainCards = {};
+    activeCards = {};
+  }
 
-    // 无主 Agent：隐藏整个网格，并清空残留卡片（避免隐藏期间遗留旧 DOM）
-    if (!list.length) {
-      els.mainWrap.classList.add('hidden');
-      Object.keys(mainCards).forEach(function (id) { removeActiveCard(id, mainCards); });
-      return;
-    }
-    els.mainWrap.classList.remove('hidden');
+  /* ---------------- 活动卡片网格（主/子分栏，共用一套卡片逻辑） ---------------- */
+  /* 主 Agent（左栏 main-grid） */
+  function renderMain(mainActive) {
+    renderActive(mainActive, mainCards, els.mainGrid);
+  }
 
+  /* 子 Agent（右栏 active-grid）：list 为空时清理缓存中多余卡片。
+   * 清理与离场动画协调：
+   * - 本轮刚完成/失败的卡片（状态快照中 now 为 done/failed）跳过，
+   *   统一交由 animateAgentChanges 走"庆祝 → 挥手拜拜"时序，避免抢先触发离场；
+   * - 其他从活动区消失的进行中卡片（prev 非 done/failed，如被服务端超时回收）
+   *   同样播放"挥手拜拜 → 淡出"离场动画（leaveCard）；
+   * - 其余（main、已完成/失败过、无状态记录的）直接 removeActiveCard 淡出移除。 */
+  function renderActive(list, cache, grid, statusMap) {
     const seen = new Set(list.map(function (a) { return a.id; }));
 
-    // 清理已不在主列表中的旧卡片（例如状态变为 done/failed 被折叠走）
-    Object.keys(mainCards).forEach(function (id) {
-      if (!seen.has(id)) removeActiveCard(id, mainCards);
+    // 清理已不在活动集合中的卡片
+    Object.keys(cache).forEach(function (id) {
+      const rec = cache[id];
+      if (seen.has(id) || !rec || rec.leavingTimer) return;
+      const prev = prevAgentMap.get(id);
+      const now = statusMap ? statusMap.get(id) : null;
+      if (prev && prev !== 'done' && prev !== 'failed' && cache === activeCards) {
+        if (now === 'done' || now === 'failed') return; // 本轮刚完成/失败：交给 animateAgentChanges
+        leaveCard(id);   // 其他原因消失：挥手拜拜 → 淡出消失
+        return;
+      }
+      removeActiveCard(id, cache);
     });
 
     // 更新或新建
-    list.forEach(function (agent) { upsertCard(agent, mainCards, els.mainGrid); });
+    list.forEach(function (agent) { upsertCard(agent, cache, grid); });
   }
 
-  /* ---------------- 活动卡片网格 ---------------- */
-  function renderActive(active) {
-    const seen = new Set(active.map(function (a) { return a.id; }));
-
-    // 清理已不在活动集合中的卡片（例如状态变为 done/failed 被折叠走）
-    Object.keys(activeCards).forEach(function (id) {
-      if (!seen.has(id)) removeActiveCard(id);
-    });
-
-    // 提示文案
-    els.noActiveNote.classList.toggle('hidden', active.length > 0);
-
-    // 更新或新建
-    active.forEach(function (agent) { upsertCard(agent); });
-  }
-
-  /* 创建卡片：grid 指定目标网格（主 Agent 用 mainGrid），缺省挂到 activeGrid */
+  /* 创建/更新卡片：cache 区分 main-grid / active-grid，grid 指定挂载网格 */
   function upsertCard(agent, cache, grid) {
-    const map = cache || activeCards;
-    let rec = map[agent.id];
+    let rec = cache[agent.id];
     if (!rec) {
       rec = createCard(agent, grid);
-      map[agent.id] = rec;
+      cache[agent.id] = rec;
     }
     updateCard(rec, agent);
   }
 
-  /* 移除卡片：cache 指定所属缓存（主 Agent 用 mainCards），缺省为 activeCards */
+  /* 移除卡片：从对应缓存删除并播放淡出动画 */
   function removeActiveCard(id, cache) {
-    const map = cache || activeCards;
-    const rec = map[id];
+    const rec = cache[id];
     if (!rec) return;
-    delete map[id];
+    delete cache[id];
     rec.el.classList.add('removing');
     window.setTimeout(function () {
       if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
     }, 420);
   }
 
+  /* 子 Agent 完成/失败离场：done 时先播庆祝（waveDelay > 0 的等待窗口内挂
+   * .celebrating 类，保持手持文件姿势），窗口结束后加 is-leaving 类
+   * （CSS 挥手拜拜 → 延迟淡出消失），总时长顺延 waveDelay 后从缓存与 DOM 移除。
+   * 主 Agent（main）常驻左栏，不参与。 */
+  function leaveCard(id, waveDelay) {
+    const rec = activeCards[id];
+    if (!rec || rec.leavingTimer) return;
+    const delay = waveDelay || 0;
+    rec.el.classList.add('celebrating');
+    rec.leavingTimer = window.setTimeout(function () {
+      rec.el.classList.remove('celebrating');
+      rec.el.classList.add('is-leaving');
+    }, delay);
+    window.setTimeout(function () {
+      // 仅当缓存仍是本卡片时删除（防止同 id 复活出新卡时误删）
+      if (activeCards[id] === rec) delete activeCards[id];
+      if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+    }, LEAVE_TOTAL_MS + delay);
+  }
+
   /* ---------- 创建 / 更新单张卡片 ---------- */
-  /* grid：目标网格元素，缺省挂到 activeGrid（主 Agent 卡片传入 mainGrid） */
   function createCard(agent, grid) {
     const el = document.createElement('article');
     el.className = 'agent-card enter';
     el.innerHTML = cardShell(agent);
-    (grid || els.activeGrid).appendChild(el);
+    // 主 Agent 特殊标识（金色边框 + 徽章样式见 style.css）
+    if (agent.id === 'main') el.classList.add('is-main');
+    el.dataset.id = agent.id; // ID 只存 data 属性供定位，不在界面展示
+    grid.appendChild(el);
 
     const rec = {
       el: el,
@@ -279,19 +643,55 @@
     updateHistory(rec, agent);
   }
 
-  /* 卡片外壳：头部 + 状态区（动态）+ 元信息 + 历史 */
+  /* ---------------- 办公场景（卡片内坐姿小人） ---------------- */
+  /* 坐姿小人 + 电脑（屏幕+键盘）+ 桌子，90x70 视口；
+   * 屏幕闪光 / 手臂姿势等状态动画由 style.css 按 .agent-card.status-* 驱动。 */
+  const OFFICE_SVG =
+    '<svg class="office-scene" viewBox="0 0 90 70" aria-hidden="true">' +
+      // 桌子
+      '<rect x="8" y="48" width="74" height="5" rx="2" fill="currentColor" opacity="0.25"/>' +
+      '<rect x="10" y="53" width="4" height="12" fill="currentColor" opacity="0.2"/>' +
+      '<rect x="76" y="53" width="4" height="12" fill="currentColor" opacity="0.2"/>' +
+      // 电脑屏幕（暗底 + 可动画的发光层）
+      '<rect class="pc-screen" x="28" y="22" width="34" height="24" rx="3" fill="currentColor" opacity="0.15"/>' +
+      '<rect class="pc-screen-glow" x="31" y="25" width="28" height="18" rx="2" fill="currentColor" opacity="0"/>' +
+      // 电脑底座
+      '<rect x="38" y="46" width="14" height="3" fill="currentColor" opacity="0.3"/>' +
+      // 坐姿小人（头 + 身体 + 手臂伸向键盘）
+      '<circle class="office-head" cx="15" cy="22" r="6" fill="none" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="office-body" x1="15" y1="28" x2="15" y2="44" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="office-arm-l" x1="15" y1="32" x2="26" y2="38" stroke="currentColor" stroke-width="2"/>' +
+      '<line class="office-arm-r" x1="15" y1="32" x2="26" y2="40" stroke="currentColor" stroke-width="2"/>' +
+      // 坐姿腿（弯曲在桌下）
+      '<line class="office-leg-l" x1="15" y1="44" x2="9" y2="50" stroke="currentColor" stroke-width="2.5"/>' +
+      '<line class="office-leg-r" x1="15" y1="44" x2="22" y2="50" stroke="currentColor" stroke-width="2.5"/>' +
+    '</svg>';
+
+  /* 交接文件小纸片：追加到 .office-scene 内，由 .has-file 控制显隐。
+   * 位置在坐姿小人右手前上方（右手臂前伸 -50° 时指尖 ~(28,29)，纸片左缘即落点）。 */
+  const OFFICE_FILE_SVG =
+    '<g class="office-file" aria-hidden="true">' +
+      '<rect x="27" y="18" width="9" height="13" rx="1.5" fill="#e7eaf3" stroke="#8d97ad" stroke-width="1"/>' +
+      '<line x1="29" y1="23" x2="34" y2="23" stroke="#8d97ad" stroke-width="1.2"/>' +
+      '<line x1="29" y1="26" x2="34" y2="26" stroke="#8d97ad" stroke-width="1.2"/>' +
+    '</g>';
+
+  /* 卡片外壳：头部（任务描述，不显示长 ID）+ 状态区（动态）+ 办公场景 + 元信息 + 历史 */
   function cardShell(agent) {
-    const type = typeof agent.type === 'string' ? agent.type : 'Agent';
-    var name = typeof agent.name === 'string' && agent.name ? agent.name : type;
+    const type = typeof agent.type === 'string' && agent.type ? agent.type : 'Agent';
+    // 名称显示：优先任务描述 name；为空时主 Agent 固定显示"主 Agent"，子 Agent 显示 type
+    var name = typeof agent.name === 'string' && agent.name ? agent.name : (agent.id === 'main' ? '主 Agent' : type);
     name = truncate(name, 30);
+    const badge = agent.id === 'main' ? '主' : type;
     return '' +
       '<div class="card-wrap">' +
         '<span class="accent" aria-hidden="true"></span>' +
         '<div class="card-head">' +
-          '<span class="agent-id">' + escapeHtml(agent.id) + '</span>' +
-          '<span class="type-badge">' + escapeHtml(name) + '</span>' +
+          '<span class="agent-name">' + escapeHtml(name) + '</span>' +
+          '<span class="type-badge">' + escapeHtml(badge) + '</span>' +
         '</div>' +
         '<div class="status-area"></div>' +
+        OFFICE_SVG +
         '<div class="meta-line">' +
           '<span class="meta-item">⏱ <b class="elapsed-num">已用 --:--</b></span>' +
           '<span class="meta-item">🧰 <b class="tools-num">工具 0 次</b></span>' +
@@ -381,74 +781,12 @@
     if (s.toLowerCase() === 'tool') return { kind: 'k-tool', text: '调用工具' };
     if (s.toLowerCase() === 'start') return { kind: 'k-start', text: '开始' };
     if (s.toLowerCase() === 'done' || s.toLowerCase() === 'end') return { kind: 'k-done', text: '结束' };
-    if (s.toLowerCase() === 'failed') return { kind: 'k-other', text: '失败' };
+    // 服务端失败历史简记 push 的是 "error"（见 server/server.mjs），与 "failed" 一并翻译
+    if (s.toLowerCase() === 'failed' || s.toLowerCase() === 'error') return { kind: 'k-other', text: '失败' };
     return { kind: 'k-other', text: s };
   }
 
-  /* ---------------- 完成 / 失败折叠区 ---------------- */
-  function renderFinished(finished) {
-    if (!finished.length) {
-      els.finishedSection.classList.add('hidden');
-      return;
-    }
-    els.finishedSection.classList.remove('hidden');
-
-    const sorted = finished.slice().sort(function (a, b) {
-      // 失败的排前面，更醒目
-      const pa = normalizeStatus(a.status) === 'failed' ? 0 : 1;
-      const pb = normalizeStatus(b.status) === 'failed' ? 0 : 1;
-      return pa - pb;
-    });
-
-    els.finishedCount.textContent = String(sorted.length);
-
-    const sig = sorted.map(function (a) {
-      return a.id + '#' + normalizeStatus(a.status);
-    }).join(',');
-
-    if (sig !== finishedSignature) {
-      finishedSignature = sig;
-      els.finishedList.innerHTML = sorted.map(finishedRow).join('');
-    }
-  }
-
-  function finishedRow(agent) {
-    const status = normalizeStatus(agent.status);
-    const meta = STATUS_META[status];
-    const dot = '<span class="fin-dot" aria-hidden="true"></span>';
-    const id = '<span class="fin-id">' + escapeHtml(agent.id) + '</span>';
-    var name = typeof agent.name === 'string' && agent.name ? agent.name : meta.label;
-    name = truncate(name, 30);
-    const label = '<span class="fin-em">' + meta.emoji + '</span><span>' + escapeHtml(name) + '</span>';
-
-    let prefix = '';
-    if (status === 'done') {
-      prefix = CHECK_SVG;      // 完成：绿色勾号 svg（绘制动画）
-    } else if (status === 'failed') {
-      prefix = '<span class="failed-x" aria-hidden="true">✕</span>';
-    }
-
-    return '<div class="finished-item is-' + status + ' chime-in">' +
-      dot + prefix + id + label +
-    '</div>';
-  }
-
-  /* ---------------- summary 与页脚 ---------------- */
-  function renderSummary(s) {
-    setSum('total', s.total);
-    setSum('active', s.active);
-    setSum('queued', s.queued);
-    setSum('thinking', s.thinking);
-    setSum('tool', s.tool);
-    setSum('done', s.done);
-    setSum('failed', s.failed);
-  }
-
-  function setSum(key, value) {
-    const node = els.summary[key];
-    if (node) node.textContent = fmtNum(value);
-  }
-
+  /* ---------------- 页脚 ---------------- */
   function renderFooter(updatedAt) {
     if (!updatedAt) {
       els.updatedAt.textContent = '—';
@@ -460,14 +798,6 @@
       return;
     }
     els.updatedAt.textContent = '更新时间 ' + d.toLocaleTimeString('zh-CN', { hour12: false });
-  }
-
-  /* ---------------- 折叠区开关 ---------------- */
-  function toggleFinished() {
-    finishedOpen = !finishedOpen;
-    els.finishedSection.classList.toggle('open', finishedOpen);
-    els.finishedList.classList.toggle('hidden', !finishedOpen);
-    els.finishedHead.setAttribute('aria-expanded', String(finishedOpen));
   }
 
   /* ---------------- 工具函数 ---------------- */
