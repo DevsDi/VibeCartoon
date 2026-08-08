@@ -12,10 +12,13 @@
   /* ---------------- 配置 ---------------- */
   const POLL_INTERVAL = 600;          // 轮询间隔（毫秒）
   const FETCH_TIMEOUT = 2500;         // 单次请求超时（毫秒），防止轮询堆积
-  const HISTORY_TAIL = 6;             // history 轨迹最多显示的条数
   /* main 主 Agent 空闲判定阈值（毫秒）：lastSeen 距今超过该值 → 前端展示"待机"。
    * 仅影响 main 卡片展示，不改服务端数据；有新事件（lastSeen 刷新）自动恢复真实状态 */
   const IDLE_TIMEOUT = 60000;
+
+  /* "最近工具"最多显示的条数：只取 history 中的 tool:xxx 条目（简化版，
+   * thinking/start/done 等状态项不展示） */
+  const TOOL_TAIL = 3;
 
   /* 状态 → 展示元信息 */
   const STATUS_META = {
@@ -43,17 +46,23 @@
   /* 子 Agent 完成（done）庆祝时长：粒子散开播放完，才进入挥手拜拜 */
   const CELEBRATE_MS = 1800;
 
+  /* 火柴人单程跑动耗时（毫秒）：两栏三段式 1.8+2.4+0.8s = 5s，窄屏单栏直线同为 5s。
+   * 方案 D：done 子卡的挥手拜拜等待窗口 = 庆祝 + 火柴人到达，
+   * 使"主 Agent 接住文件"与"子卡挥手告别"同屏。 */
+  const STICKMAN_TRAVEL_MS = 5000;
+
   /* 活动卡片网格内的排序优先级：越靠前越优先 */
   const ACTIVE_PRIORITY = { asking: 0, tool: 1, thinking: 2, queued: 3, running: 4, unknown: 5 };
 
   /* ---------------- 内部状态 ---------------- */
   let els = {};                 // 缓存的 DOM 引用
-  let mainCards = {};           // 主 Agent（id=main）卡片缓存（main-grid）: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
-  let activeCards = {};         // 子 Agent 卡片缓存（active-grid）: id -> { el, status, elapsedText, toolsText, historyKey, flashTimer }
+  let mainCards = {};           // 主 Agent（id=main）卡片缓存（main-grid）: id -> { el, status, elapsedText, toolsText, toolsKey, flashTimer }
+  let activeCards = {};         // 子 Agent 卡片缓存（active-grid）: id -> { el, status, elapsedText, toolsText, toolsKey, flashTimer }
   let polling = false;          // 轮询互斥锁
   let prevAgentMap = new Map(); // 全部 Agent: id -> 上次渲染时的状态（用于检测新出现/完成）
   let stickmanSeeded = false;   // 首次渲染是否已建立基准（首次不触发火柴人动画）
   let lastMainAgentCallCount = 0; // main 的 history 中派发/补充任务工具调用（Agent/SendMessage）累计次数基准
+  let hasSubAgents = false;       // 本轮渲染是否存在存活子 Agent（方案 E：main 正等子 Agent 交回结果时不判待机）
 
   /* ---------------- 启动 ---------------- */
   document.addEventListener('DOMContentLoaded', init);
@@ -135,6 +144,9 @@
     const mainList = agents.filter(function (a) { return a.id === 'main'; });
     const subList = agents.filter(function (a) { return a.id !== 'main'; });
 
+    // 方案 E：main 是否在等待子 Agent 交回结果（有存活子 Agent 时 main 不判"待机"）
+    hasSubAgents = subList.length > 0;
+
     const mainActive = mainList; // 常驻：不做 done/failed 过滤
     const subActive = subList.filter(function (a) {
       return !FOLDED_STATUS[normalizeStatus(a.status)]; // 完成/失败的子 Agent 走拜拜消失，不进活动区
@@ -167,11 +179,13 @@
    * 由 style.css 依据 .stickman-runner.with-doc / .report 控制显隐。 */
   const STICKMAN_SVG =
     '<svg class="stickman" viewBox="0 0 30 40" aria-hidden="true">' +
-      // 头部双层 emoji（font-size 11、y=12，视觉"圆点"大小居中）：
+      // 头部三层 emoji（font-size 11、y=12，视觉"圆点"大小居中）：
       // 派发（toSub）显示 😎（主 Agent 派人送文件）；交回汇报（backToMain，.flip）
-      // 切换为 😄（子 Agent 完成交回，与 celebrating 表情呼应），显隐规则见 style.css
+      // 按子 Agent 最终状态切换：done → 😄（.report，与 celebrating 表情呼应）、
+      // failed → 😢（.failed，失败回禀），显隐规则见 style.css
       '<text class="stick-head stick-head-run" x="15" y="12" text-anchor="middle" font-size="11">😎</text>' +
       '<text class="stick-head stick-head-report" x="15" y="12" text-anchor="middle" font-size="11">😄</text>' +
+      '<text class="stick-head stick-head-fail" x="15" y="12" text-anchor="middle" font-size="11">😢</text>' +
       '<line x1="15" y1="14" x2="15" y2="26" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="arm-left" x1="15" y1="18" x2="6" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="arm-right" x1="15" y1="18" x2="24" y2="13" stroke="currentColor" stroke-width="2.5"/>' +
@@ -223,6 +237,7 @@
         toSubThisRound.add(a.id);
         runStickman('toSub', a);
         showNewTaskTag(a.id); // C：新任务标记
+        assignTaskFace(getCardElById(a.id), nowMap); // C：接到任务即"翻脸"😟（无需等火柴人到达）
       }
     });
 
@@ -237,6 +252,7 @@
       if (target) {
         runStickman('toSub', target);
         showNewTaskTag(target.id);
+        assignTaskFace(getCardElById(target.id), nowMap); // C：补充任务同样"翻脸"😟
       }
     }
     lastMainAgentCallCount = mainAgentCallCount(agents);
@@ -248,15 +264,27 @@
       const now = nowMap.get(a.id);
       if (prev && prev !== 'done' && prev !== 'failed' &&
           (now === 'done' || now === 'failed')) {
-        // 交接第二步：子 Agent 办公小人拿起文件 → 火柴人（持文件）跑回主 Agent 汇报
-        setOfficeFile(getCardElById(a.id), true);
-        // 完成庆祝（仅 done）：粒子散开 ~1.8s 后才进入挥手拜拜；
-        // 失败不庆祝（保留 ❌ 抖动）；动效敏感用户跳过庆祝与延时
-        const reducedMotion = window.matchMedia &&
+        const isDone = now === 'done';
+        const isReduced = window.matchMedia &&
           window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        if (now === 'done' && !reducedMotion) celebrateCard(a.id);
-        runStickman('backToMain', a);
-        leaveCard(a.id, now === 'done' && !reducedMotion ? CELEBRATE_MS : 0, now === 'done');
+        // 交接第二步：子 Agent 办公小人拿起文件 → 火柴人（持文件）跑回主 Agent 汇报
+        const cardEl = getCardElById(a.id);
+        setOfficeFile(cardEl, true);
+        // 失败：子卡挂 .task-failed 失败视觉（红辉光 + 😢 + 抖动 + 状态区改"失败"）。
+        // 失败后子卡即被移出活动列表、不再被 updateCard 刷新，状态区会停留在进入
+        // failed 前一刻（如"调用工具中"蓝色 spinner），必须在此一次性改写。
+        // 不复用 status-failed / status-done，避免与完成举手/挥手动画互相干扰
+        if (!isDone) markCardFailed(cardEl);
+        // 完成庆祝（仅 done）：粒子散开 ~1.8s 后才进入挥手拜拜；
+        // 失败不庆祝（走 .task-failed 失败视觉，不再是"保留 ❌ 抖动"）；
+        // 动效敏感用户跳过庆祝与延时
+        if (isDone && !isReduced) celebrateCard(a.id);
+        // 火柴人跑回汇报：done → 😄 + 带回绿勾；failed → 😢 不带绿勾（第三参 isFailed）
+        runStickman('backToMain', a, !isDone);
+        // 挥手拜拜等待窗口（方案 D）：done = 庆祝 1.8s + 火柴人到达 5s，
+        // 让"主 Agent 接住文件"与"子卡挥手告别"同屏；动效敏感用户无火柴人，
+        // 保持仅庆祝；失败不庆祝，直接进入挥手
+        leaveCard(a.id, isDone && !isReduced ? CELEBRATE_MS + STICKMAN_TRAVEL_MS : 0, isDone);
       }
     });
 
@@ -274,6 +302,15 @@
    * totalMs 结束后停止并移除火柴人。 */
   function driveStickman(stick, path, totalMs) {
     const t0 = Date.now();
+    // 滚动补偿（方案：滚动错位修复）：path 坐标是动画开始时一次性读取的
+    // getBoundingClientRect 视口坐标，而火柴人容器是 fixed 定位。动画期间页面
+    // 滚动（scrollY 变化）会让火柴人停在旧视口位置、与卡片错位。逐帧读取当前
+    // scrollY，把差值补偿到 top（页面仅垂直滚动，left 无需补偿）：
+    // 滚动后卡片视口位置 = 文档坐标 - scrollY，故补偿量为 t0ScrollY - scrollY。
+    const t0ScrollY = window.scrollY;
+    const scrollDelta = function () {
+      return t0ScrollY - window.scrollY;
+    };
     const step = function () {
       const t = Math.min(Date.now() - t0, totalMs);
       // 定位当前所在路径段
@@ -286,14 +323,14 @@
       if (seg === -1) {
         const last = path[path.length - 1];
         stick.style.left = last.x + 'px';
-        stick.style.top = last.y + 'px';
+        stick.style.top = (last.y + scrollDelta()) + 'px';
         return;
       }
       const from = path[seg];
       const to = path[seg + 1];
       const p = to.dur > 0 ? easeInOut(Math.max(0, Math.min(1, (t - acc) / to.dur))) : 1;
       stick.style.left = (from.x + (to.x - from.x) * p) + 'px';
-      stick.style.top = (from.y + (to.y - from.y) * p) + 'px';
+      stick.style.top = (from.y + (to.y - from.y) * p + scrollDelta()) + 'px';
     };
     step();
     const timer = window.setInterval(step, 16);
@@ -304,10 +341,12 @@
   }
 
   /* direction: 'toSub'（主 → 子）| 'backToMain'（子 → 主）
+   * isFailed（仅 backToMain 有效）：子 Agent 最终状态为 failed 时火柴人表情切换为
+   * 😢 且不带汇报绿勾（.report 仅在 done 时挂，见 style.css）。
    * 三段式路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有宽阔跑道（列间 gap 100px）。
    * 火柴人先水平穿过跑道 → 在跑道内垂直移动到目标卡片中心高度 → 水平切入/切出卡片边缘，
    * 全程不与其他卡片重叠；窄屏单栏（两栏间距 < 30px）时退化为直线过渡。 */
-  function runStickman(direction, agent) {
+  function runStickman(direction, agent, isFailed) {
     const layer = els.animLayer;
     if (!layer || !agent || agent.id === 'main') return;
     // 动效敏感用户：直接不创建火柴人（style.css 另有全局降级）
@@ -329,10 +368,13 @@
       toRect = toEl ? toEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
     }
 
-    // 创建火柴人：跑回来时镜像翻转（面向左）+ 带回汇报绿勾 + 手里拿着交接的文件
-    // （.doc 文件随 with-doc 显形；派发时同样持文件）
+    // 创建火柴人：跑回来时镜像翻转（面向左）+ 手里拿着交接的文件（.doc 随 with-doc
+    // 显形；派发时同样持文件）。汇报表情按成败区分：done → .report（😄 + 绿勾）、
+    // failed → .failed（😢 不带绿勾），显隐规则见 style.css
     const stick = document.createElement('div');
-    stick.className = 'stickman-runner' + (direction === 'backToMain' ? ' flip report with-doc' : ' with-doc');
+    stick.className = 'stickman-runner' + (direction === 'backToMain'
+      ? ' flip with-doc' + (isFailed ? ' failed' : ' report')
+      : ' with-doc');
     stick.innerHTML = STICKMAN_SVG;
     stick.style.transition = 'none'; // 位置由 JS 逐帧驱动，禁用 CSS 过渡
     layer.appendChild(stick);
@@ -354,9 +396,9 @@
     let totalMs;
     if (runway >= 30) {
       // 两栏布局：水平(1.8s) → 垂直(2.4s) → 水平(0.8s) 三段式，全程在跑道内
-      // （派发 toSub 与汇报 backToMain 共用本路径；用户要求派发总时长 5s）
+      // （派发 toSub 与汇报 backToMain 共用本路径；总时长 = STICKMAN_TRAVEL_MS 5s）
       const PH1 = 1800, PH2 = 2400, PH3 = 800;
-      totalMs = PH1 + PH2 + PH3;
+      totalMs = STICKMAN_TRAVEL_MS;
       driveStickman(stick, [
         { x: startX, y: startY, dur: 0 },
         { x: gapX,   y: startY, dur: PH1 },
@@ -365,7 +407,7 @@
       ], totalMs);
     } else {
       // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s，与两栏节奏接近）
-      totalMs = 5000;
+      totalMs = STICKMAN_TRAVEL_MS;
       driveStickman(stick, [
         { x: startX, y: startY, dur: 0 },
         { x: endX,   y: endY,   dur: totalMs }
@@ -383,14 +425,8 @@
         // 交接第一步：子 Agent 办公小人伸手接住文件
         setOfficeFile(el, true);
         el.classList.add('task-delivered');
-        // 表情切换：接到任务 → 😟（"又要干活了"），约 3.5s 后恢复 🧑 开始工作。
-        // 若期间已完成（celebrating/is-leaving，优先级更高显示 😄）则无碍，
-        // 移除时卡若已离场（isConnected 守卫）直接跳过。
-        el.classList.add('task-assigned');
-        window.setTimeout(function () {
-          if (!el.isConnected) return;
-          el.classList.remove('task-assigned');
-        }, 3500);
+        // 表情切换（方案 C）：😟 已在派发时刻由 assignTaskFace 挂上（无需等火柴人到达），
+        // 到达时若卡片仍在派发窗口内继续持有，此处不再重复处理
         const drop = document.createElement('span');
         drop.className = 'task-drop';
         drop.textContent = '📄';
@@ -408,8 +444,9 @@
         }, 2500);
       }, totalMs);
     } else if (direction === 'backToMain') {
-      // 交接第三步：火柴人到达主 Agent → 主 Agent 办公小人接住文件 + 绿色"收到"闪光
-      window.setTimeout(mainReceiveFile, totalMs);
+      // 交接第三步：火柴人到达主 Agent → 主 Agent 办公小人接住文件 + 收/拒收闪光：
+      // done（成功）→ 绿色"收到" + 😄；failed（失败）→ 红色"驳回" + 😟
+      window.setTimeout(function () { mainReceiveFile(!isFailed); }, totalMs);
     }
   }
 
@@ -427,21 +464,45 @@
     }
   }
 
-  /* 主 Agent 接收文件：办公小人手持文件 + 卡片绿色"收到"闪光 + 表情切换 😄
-   * （main-receiving 类，见 style.css），约 2.5s 后收回并恢复 🧑。
-   * 多个子 Agent 连续汇报时重置计时窗口，避免提前收回。 */
-  function mainReceiveFile() {
+  /* 主 Agent 接收文件：办公小人手持文件 + 卡片收/拒收闪光 + 表情切换。
+   * success=true（子 Agent 完成）：绿色"收到"闪光 + 😄（main-receiving，见 style.css）；
+   * success=false（子 Agent 失败）：红色"驳回"闪光 + 😟（main-receiving-fail）。
+   * 约 2.5s 后收回并恢复默认表情；多个子 Agent 连续汇报时重置计时窗口，避免提前收回。 */
+  function mainReceiveFile(success) {
     const mainEl = getCardElById('main');
     if (!mainEl) return;
+    const ok = success !== false;
     setOfficeFile(mainEl, true);
-    mainEl.classList.add('received-flash');
-    mainEl.classList.add('main-receiving');
+    mainEl.classList.add(ok ? 'received-flash' : 'received-flash-fail');
+    mainEl.classList.add(ok ? 'main-receiving' : 'main-receiving-fail');
     if (mainEl._receiveTimer) window.clearTimeout(mainEl._receiveTimer);
     mainEl._receiveTimer = window.setTimeout(function () {
       setOfficeFile(mainEl, false);
       mainEl.classList.remove('received-flash');
+      mainEl.classList.remove('received-flash-fail');
       mainEl.classList.remove('main-receiving');
+      mainEl.classList.remove('main-receiving-fail');
     }, 2500);
+  }
+
+  /* 子 Agent 失败离场视觉（方案 A）：挂 .task-failed 类（CSS 驱动红色辉光 / 😢 低头 /
+   * 失败抖动 + 红色 ✕ 圆标，见 style.css）+ 重建状态区为失败文案。失败后子卡即被
+   * 移出活动列表、updateCard 不再刷新它，状态区会停留在进入 failed 前一刻
+   * （如"调用工具中"蓝色 spinner），必须在此一次性改写为 ❌ 失败。
+   * 用独立类 .task-failed 而非 status-failed / status-done，避免与完成举手/挥手动画冲突。
+   * el 可能为 null（卡片已移出 DOM），调用方需自行保证。 */
+  function markCardFailed(el) {
+    if (!el) return;
+    el.classList.add('task-failed');
+    const area = el.querySelector('.status-area');
+    if (!area) return;
+    const meta = STATUS_META.failed;
+    area.innerHTML =
+      '<div class="status-line">' +
+        '<span class="status-emoji">' + meta.emoji + '</span>' +
+        '<span class="status-label">' + meta.label + '</span>' +
+        '<span class="status-extra"><span class="failed-x" aria-hidden="true">✕</span></span>' +
+      '</div>';
   }
 
   /* 子 Agent 完成庆祝：卡片顶部散开彩带/星星粒子（CSS 动画沿 --dx/--dy/--rot
@@ -487,6 +548,24 @@
     window.setTimeout(function () {
       if (badge.parentNode) badge.parentNode.removeChild(badge);
     }, 2200);
+  }
+
+  /* 新任务"翻脸"表情（方案 C）：给子 Agent 卡片挂 task-assigned（😟，"又要干活了"），
+   * 约 3.5s 后移除（恢复默认表情）。在"新子卡出现 / 补充派发"时刻调用——子 Agent
+   * 1-2 秒就开始干活，表情应同步跟上，而不是等火柴人 5s 到达才"翻脸"。
+   * 卡片已离场（isConnected 守卫）或首帧即完成/失败（nowMap 状态快照）时跳过。
+   * 参数：el 目标卡片元素；nowMap 本轮状态快照（可空，用于"首帧即 done/failed"判定）。 */
+  function assignTaskFace(el, nowMap) {
+    if (!el || !el.isConnected) return;
+    if (nowMap) {
+      const st = nowMap.get(el.dataset.id);
+      if (st === 'done' || st === 'failed') return;
+    }
+    el.classList.add('task-assigned');
+    window.setTimeout(function () {
+      if (!el.isConnected) return;
+      el.classList.remove('task-assigned');
+    }, 3500);
   }
 
   /* Agent 卡片元素：已完成/失败被移出活动区后返回 null，调用方自行跳过。
@@ -564,9 +643,16 @@
     list.forEach(function (agent) { upsertCard(agent, cache, grid); });
   }
 
-  /* 创建/更新卡片：cache 区分 main-grid / active-grid，grid 指定挂载网格 */
+  /* 创建/更新卡片：cache 区分 main-grid / active-grid，grid 指定挂载网格。
+   * 方案 F：缓存里已存在正在离场（leavingTimer 未清）的旧 rec 时，说明同 id
+   * Agent 复活——丢弃旧 rec、新建替换；旧 rec 的离场定时器到期只会移除旧 DOM
+   * （leaveCard 删除回调还有 activeCards[id] === rec 守卫），不会误删新卡。 */
   function upsertCard(agent, cache, grid) {
     let rec = cache[agent.id];
+    if (rec && rec.leavingTimer) {
+      delete cache[agent.id];
+      rec = null;
+    }
     if (!rec) {
       rec = createCard(agent, grid);
       cache[agent.id] = rec;
@@ -590,7 +676,9 @@
    * （CSS 挥手拜拜 → 延迟淡出消失），总时长顺延 waveDelay 后从缓存与 DOM 移除。
    * done 离场额外挂 .leaving-done（style.css 据此在挥手/淡出期间保持 😄 表情，
    * 失败卡不加，避免"失败还开心"）；子卡在离场期间不再被 updateCard 更新，
-   * 状态类停留在进入 done 前一刻，故不能依赖 status-done 选择器。
+   * 状态类停留在进入 done 前一刻，故不能依赖 status-done 选择器；
+   * 失败卡的红色失败视觉（😢 + 抖动 + 状态区改"失败"）由 markCardFailed
+   * 挂的 .task-failed 类驱动（style.css）。
    * 主 Agent（main）常驻左栏，不参与。 */
   function leaveCard(id, waveDelay, isDone) {
     const rec = activeCards[id];
@@ -624,12 +712,12 @@
       status: null,
       elapsedText: '',
       toolsText: '',
-      historyKey: '',
+      toolsKey: null,           // 初始 null（非空串）：空工具列表也要触发首次"暂无工具"渲染
       flashTimer: 0,
       statusArea: el.querySelector('.status-area'),
       elapsedEl: el.querySelector('.elapsed-num'),
       toolsEl: el.querySelector('.tools-num'),
-      historyItems: el.querySelector('.history-items')
+      toolItems: el.querySelector('.tool-items')
     };
 
     // 1.5s 入场动画结束后移除 enter，避免干扰后续状态闪烁
@@ -639,12 +727,16 @@
 
   /* main 主 Agent 的展示状态：lastSeen 距今超过 IDLE_TIMEOUT（且非完成/失败）时
    * 显示"待机"（idle，见 STATUS_META），否则按实际状态显示。
+   * 方案 E：main 正在思考/调用工具、且仍有存活子 Agent 时不算待机——它正阻塞等待
+   * 子 Agent 交回结果，应显示真实状态，避免"边干活边睡觉"。
    * 只影响前端展示，不改服务端数据；main 有新事件（lastSeen 刷新）后自动恢复正常状态。
    * 子 Agent 不走此逻辑（完成/失败走拜拜离场，不适用待机）。 */
   function effectiveStatus(agent) {
     if (agent.id === 'main' && agent.lastSeen) {
       const idleMs = Date.now() - new Date(agent.lastSeen).getTime();
-      if (idleMs > IDLE_TIMEOUT && agent.status !== 'done' && agent.status !== 'failed') {
+      const busyWaiting = hasSubAgents &&
+        (agent.status === 'thinking' || agent.status === 'tool');
+      if (idleMs > IDLE_TIMEOUT && agent.status !== 'done' && agent.status !== 'failed' && !busyWaiting) {
         return 'idle';
       }
     }
@@ -678,12 +770,22 @@
       rec.toolsEl.textContent = toolsText;
     }
 
-    // 4) 历史轨迹（内容变化才重绘，避免闪烁）
-    updateHistory(rec, agent);
+    // 4) 最近工具（简化版：仅 tool:xxx 条目，内容变化才重绘避免闪烁；
+    //    超出卡片固定高度时由 .tool-items 内部滚动，见 style.css）
+    const toolsKey = extractRecentTools(agent.history).join('|');
+    if (rec.toolsKey !== toolsKey) {
+      rec.toolsKey = toolsKey;
+      const tools = toolsKey ? toolsKey.split('|') : [];
+      rec.toolItems.innerHTML = tools.length
+        ? tools.map(function (t) {
+            return '<span class="tool-chip">' + escapeHtml(t) + '</span>';
+          }).join('')
+        : '<span class="tool-none">— 暂无工具 —</span>';
+    }
   }
 
   /* ---------------- 办公场景（卡片内坐姿小人） ---------------- */
-  /* 坐姿小人 + 电脑（屏幕+键盘）+ 桌子，90x70 视口；
+  /* 坐姿小人 + 电脑（屏幕+键盘）+ 桌子，70x55 视口；
    * 屏幕闪光 / 手臂姿势等状态动画由 style.css 按 .agent-card.status-* 驱动。 */
   const OFFICE_SVG =
     '<svg class="office-scene" viewBox="0 0 90 70" aria-hidden="true">' +
@@ -710,6 +812,8 @@
       // 开心表情层：子 Agent 完成庆祝（celebrating）/ 挥手拜拜（is-leaving，仅 done）、
       // 主 Agent 接收任务（main-receiving）时切换为 😄（显隐规则见 style.css）
       '<text class="office-head office-head-happy" x="15" y="28" text-anchor="middle" font-size="16">😄</text>' +
+      // 失败表情层：子 Agent 失败离场（.task-failed，markCardFailed 加挂）时切换为 😢
+      '<text class="office-head office-head-fail" x="15" y="28" text-anchor="middle" font-size="16">😢</text>' +
       '<line class="office-body" x1="15" y1="28" x2="15" y2="44" stroke="currentColor" stroke-width="2.5"/>' +
       '<line class="office-arm-l" x1="15" y1="32" x2="26" y2="38" stroke="currentColor" stroke-width="2"/>' +
       '<line class="office-arm-r" x1="15" y1="32" x2="26" y2="40" stroke="currentColor" stroke-width="2"/>' +
@@ -747,9 +851,9 @@
           '<span class="meta-item">⏱ <b class="elapsed-num">已用 --:--</b></span>' +
           '<span class="meta-item">🧰 <b class="tools-num">工具 0 次</b></span>' +
         '</div>' +
-        '<div class="history-block">' +
-          '<div class="history-title">最近动作</div>' +
-          '<div class="history-items"></div>' +
+        '<div class="tool-block">' +
+          '<div class="tool-block-title">最近工具</div>' +
+          '<div class="tool-items"></div>' +
         '</div>' +
       '</div>';
   }
@@ -804,38 +908,17 @@
     }, 760);
   }
 
-  /* ---------------- 历史轨迹 ---------------- */
-  function updateHistory(rec, agent) {
-    const arr = Array.isArray(agent.history) ? agent.history : [];
-    const tail = arr.slice(-HISTORY_TAIL);
-    const key = tail.map(function (t, i) { return i + ':' + t; }).join('|');
-    if (rec.historyKey === key) return;
-    rec.historyKey = key;
-
-    if (!tail.length) {
-      rec.historyItems.innerHTML = '<span class="history-none">— 暂无动作 —</span>';
-      return;
+  /* 提取"最近调用的工具"（简化版）：只取 history 中的 tool:xxx 条目，
+   * thinking / start / done 等状态项不展示；倒序收集最近 TOOL_TAIL 条工具名。
+   * 返回工具名数组（无则空数组）。 */
+  function extractRecentTools(history) {
+    const arr = Array.isArray(history) ? history : [];
+    const tools = [];
+    for (let i = arr.length - 1; i >= 0 && tools.length < TOOL_TAIL; i--) {
+      const m = String(arr[i]).match(/^tool:(.+)$/i);
+      if (m) tools.unshift(m[1].trim() || '工具');
     }
-
-    rec.historyItems.innerHTML = tail.map(function (item) {
-      const info = describeHistory(item);
-      return '<span class="history-pill"><i class="' + info.kind + '"></i>' + escapeHtml(info.text) + '</span>';
-    }).join('');
-  }
-
-  /* 把后端原始轨迹项翻译成人话 */
-  function describeHistory(item) {
-    const s = String(item);
-    const m = s.match(/^tool:(.+)$/i);
-    if (m) return { kind: 'k-tool', text: m[1].trim() || '工具' };
-    if (s.toLowerCase() === 'thinking') return { kind: 'k-think', text: '思考' };
-    if (s.toLowerCase() === 'asking') return { kind: 'k-other', text: '等待输入' };
-    if (s.toLowerCase() === 'tool') return { kind: 'k-tool', text: '调用工具' };
-    if (s.toLowerCase() === 'start') return { kind: 'k-start', text: '开始' };
-    if (s.toLowerCase() === 'done' || s.toLowerCase() === 'end') return { kind: 'k-done', text: '结束' };
-    // 服务端失败历史简记 push 的是 "error"（见 server/server.mjs），与 "failed" 一并翻译
-    if (s.toLowerCase() === 'failed' || s.toLowerCase() === 'error') return { kind: 'k-other', text: '失败' };
-    return { kind: 'k-other', text: s };
+    return tools;
   }
 
   /* ---------------- 页脚 ---------------- */

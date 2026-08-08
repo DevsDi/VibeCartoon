@@ -95,7 +95,7 @@ body {
 .header-inner {
   max-width: 1240px;
   margin: 0 auto;
-  padding: 26px 28px 20px;
+  padding: 10px 28px 8px;
   display: flex;
   align-items: flex-end;
   flex-wrap: wrap;
@@ -125,14 +125,14 @@ body {
 }
 
 .brand-subtitle {
-  margin-top: 6px;
+  margin-top: 3px;
   color: var(--muted);
   font-size: 14px;
   letter-spacing: 0.04em;
 }
 
 /* ---------- 6. 主体与空状态 ---------- */
-.app-main { padding: 30px 0 24px; }
+.app-main { padding: 10px 0 6px; }
 
 .empty-state {
   text-align: center;
@@ -179,7 +179,8 @@ body {
   max-width: 1440px;                 /* 容器上限：大屏居中留白，小屏自动收窄 */
   margin: 0 auto;                    /* 水平居中 */
   display: grid;
-  grid-template-columns: 380px minmax(100px, 1fr) 380px;  /* 左主栏 + 跑道(≥100px) + 右子栏 */
+  grid-template-columns: 380px minmax(100px, 300px) 380px;  /* 左主栏 + 跑道(≥100px,最大300px) + 右子栏 */
+  justify-content: center;           /* 三列组在容器内居中，避免剩余空间堆积到右侧 */
   gap: 0;
   align-items: stretch;              /* 两栏等高：左栏拉伸至右栏总高 */
   padding: 0 32px;                   /* 容器内左右留白 */
@@ -203,7 +204,7 @@ body {
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--muted);
-  margin: 0 0 12px 2px;
+  margin: 0 0 6px 2px;
 }
 
 /* 左栏：纵向 flex 列，主卡片网格撑满剩余高度 */
@@ -219,7 +220,7 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: center;  /* 主卡片垂直居中，不拉伸 */
-  gap: 22px;
+  gap: 12px;
   flex: 1;                  /* 撑满左栏剩余高度 */
 }
 
@@ -227,7 +228,7 @@ body {
 .agent-grid {
   display: grid;
   grid-template-columns: 380px;
-  gap: 22px;
+  gap: 12px;
   align-items: start;
 }
 
@@ -238,6 +239,7 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   transition: border-color 0.35s ease, background-color 0.35s ease;
+  height: 280px;              /* 固定高度：所有子卡与主卡一致，便于 4 卡一屏与动画坐标稳定 */
 }
 
 /* 每个卡片带上自身状态色变量 */
@@ -251,9 +253,20 @@ body {
 
 .card-wrap {
   position: relative;
-  padding: 16px 18px 14px;
+  height: 100%;
+  padding: 10px 13px 9px;
   overflow: hidden;
   border-radius: var(--radius);
+  display: flex;              /* 固定高度下的纵向布局：最后一块（最近工具）伸缩并内部滚动 */
+  flex-direction: column;
+}
+
+/* 固定高度下，头部/状态区/场景/元信息行不参与伸缩，高度不足时由"最近工具"区吸收 */
+.card-wrap > .card-head,
+.card-wrap > .status-area,
+.card-wrap > .office-scene,
+.card-wrap > .meta-line {
+  flex-shrink: 0;
 }
 
 /* 顶部状态色条 */
@@ -314,21 +327,21 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 6px;
 }
 
 .agent-name {
   font-weight: 700;
-  font-size: 15px;
+  font-size: 13px;
   overflow-wrap: anywhere;
   color: var(--text);
 }
 
 .type-badge {
   margin-left: auto;
-  padding: 2px 9px;
+  padding: 1px 7px;
   border-radius: 6px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: #b9c3da;
@@ -340,16 +353,16 @@ body {
 .status-line {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   color: var(--sc);
   font-weight: 700;
   min-width: 0;               /* 允许子元素收缩，长工具名不撑破卡片 */
 }
 
-.status-emoji { font-size: 20px; line-height: 1; flex-shrink: 0; }
+.status-emoji { font-size: 15px; line-height: 1; flex-shrink: 0; }
 
 .status-label {
-  font-size: 15px;
+  font-size: 13px;
   letter-spacing: 0.02em;
   white-space: nowrap;        /* "调用工具中"等标签不换行 */
   flex-shrink: 0;
@@ -398,8 +411,8 @@ body {
 }
 
 .dots i {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--sc);
   animation: dotBounce 1.15s ease-in-out infinite;
@@ -415,23 +428,23 @@ body {
 
 /* tool：工具名胶囊 + conic-gradient 环形 spinner + 全宽进度条流光 */
 .tool-pill {
-  padding: 2px 10px;
+  padding: 1px 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   font-family: "Cascadia Code", Consolas, "Courier New", monospace;
   color: #dfe4ff;
   background: rgba(var(--sc-rgb), 0.14);
   border: 1px solid rgba(var(--sc-rgb), 0.45);
-  max-width: 220px;           /* 长工具名限宽，避免挤掉"调用工具中"标签 */
+  max-width: 150px;           /* 长工具名限宽，避免挤掉"调用工具中"标签 */
   overflow: hidden;
   text-overflow: ellipsis;    /* 超长省略号 */
   white-space: nowrap;        /* 不换行 */
 }
 
 .spinner {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: conic-gradient(from 0deg, var(--sc) 0deg, transparent 300deg, var(--sc) 360deg);
   -webkit-mask: radial-gradient(circle, transparent 46%, #000 47%);
@@ -446,7 +459,7 @@ body {
 .progress {
   position: relative;
   height: 6px;
-  margin-top: 13px;
+  margin-top: 6px;
   border-radius: 999px;
   background: rgba(var(--sc-rgb), 0.12);
   overflow: hidden;
@@ -482,8 +495,8 @@ body {
 }
 
 .ask-ring {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
   border: 2px solid rgba(var(--sc-rgb), 0.5);
   position: relative;
@@ -550,16 +563,18 @@ body {
 /* SVG 结构见 app.js 的 OFFICE_SVG，线条全部跟随 currentColor；
  * 状态相关动画由 .agent-card.status-* 驱动，与上方状态块互不干扰。 */
 .office-scene {
-  width: 90px;
-  height: 70px;
-  margin: 10px auto 0;
+  width: 120px;
+  height: 90px;
+  margin: 4px auto 0;
   display: block;
   color: var(--muted);
 }
 
-/* emoji 头部：优先使用系统彩色 emoji 字体（避免回退成黑白字形） */
+/* emoji 头部：优先使用系统彩色 emoji 字体（避免回退成黑白字形）；
+ * 用 CSS 覆盖 SVG 内的 font-size=16 以适配压缩后的场景尺寸 */
 .office-head {
   font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 18px;
 }
 
 /* 头部多层 text（结构见 app.js OFFICE_SVG）：
@@ -567,16 +582,18 @@ body {
  * 子 Agent 显示翻白眼（office-head-sub 🙄，:not(.is-main) 规则切换）；
  * 主 Agent 待机（status-idle）切换为打盹表情（office-head-idle）；
  * 子 Agent 接到任务（task-assigned）切换为"不开心"表情（office-head-sad）；
- * 子 Agent 完成庆祝 / 挥手拜拜期间、主 Agent 接收任务时切换为开心表情（office-head-happy）。
+ * 子 Agent 完成庆祝 / 挥手拜拜期间、主 Agent 接收任务时切换为开心表情（office-head-happy）；
+ * 子 Agent 失败离场（.task-failed）切换为失败表情（office-head-fail 😢）。
  * emoji 是彩色字形，stroke 无效，因此状态差异用显隐切换而非变色。
  * 表情层优先级（高 → 低）：
- *   celebrating(😄) > task-assigned(😟) > idle(😴) > 角色默认(主😎/子🙄)。
+ *   task-failed(😢) ≥ celebrating(😄) > task-assigned(😟) > idle(😴) > 角色默认(主😎/子🙄)。
  * 同特异性规则按书写顺序生效，故低优先级写在前面、高优先级写在后面；
  * 高优先级类存在时同时显式隐藏低优先级层，避免多层重叠渲染。 */
 .office-head-idle { display: none; }
 .office-head-sad { display: none; }
 .office-head-happy { display: none; }
 .office-head-sub { display: none; }
+.office-head-fail { display: none; }
 
 /* 角色默认表情：子 Agent（非 main）默认显示 🙄（优先级高于 idle，故写在 idle 之前） */
 .agent-card:not(.is-main) .office-head-active { display: none; }
@@ -594,12 +611,16 @@ body {
 
 /* 子 Agent done 庆祝（.celebrating）与挥手拜拜（.is-leaving，仅 done 状态挂
  * .leaving-done 标记，失败不显示开心表情）期间显示 😄（优先级最高：写在 task-assigned 之后）。
- * 期间同时隐藏 sad / active / sub 层，避免与 task-assigned / 角色默认重叠时双层渲染。 */
+ * 期间同时隐藏 sad / idle / active / sub 层，避免与 task-assigned / 待机 / 角色默认
+ * 重叠时双层渲染（方案 B 补齐 idle / sad 的隐藏）。 */
 .agent-card.celebrating .office-head-active { display: none; }
+.agent-card.celebrating .office-head-idle { display: none; }
 .agent-card.celebrating .office-head-sad { display: none; }
 .agent-card.celebrating .office-head-sub { display: none; }
 .agent-card.celebrating .office-head-happy { display: block; }
 .agent-card.is-leaving.leaving-done .office-head-active { display: none; }
+.agent-card.is-leaving.leaving-done .office-head-idle { display: none; }
+.agent-card.is-leaving.leaving-done .office-head-sad { display: none; }
 .agent-card.is-leaving.leaving-done .office-head-sub { display: none; }
 .agent-card.is-leaving.leaving-done .office-head-happy { display: block; }
 
@@ -610,6 +631,42 @@ body {
 .agent-card.is-main.main-receiving .office-head-idle { display: none; }
 .agent-card.is-main.main-receiving .office-head-sad { display: none; }
 .agent-card.is-main.main-receiving .office-head-happy { display: block; }
+
+/* 主 Agent 收到失败汇报（方案 A，.main-receiving-fail，约 2.5s 由 JS 移除）显示 😟。
+ * 与 main-receiving 同特异性、写在之后；两个类由 JS 二选一挂载，不会同时出现。 */
+.agent-card.is-main.main-receiving-fail .office-head-active { display: none; }
+.agent-card.is-main.main-receiving-fail .office-head-idle { display: none; }
+.agent-card.is-main.main-receiving-fail .office-head-sad { display: block; }
+.agent-card.is-main.main-receiving-fail .office-head-happy { display: none; }
+.agent-card.is-main.main-receiving-fail .office-head-sub { display: none; }
+
+/* 子 Agent 失败离场（方案 A，.task-failed 由 app.js markCardFailed 加挂）：
+ * 红色辉光 + 低头 + 失败抖动 + 表情切换为 😢（office-head-fail）。
+ * 独立于 status-failed（失败后子卡不再被 updateCard 刷新，挂不上状态类）；
+ * 也独立于 status-done，避免与完成举手/挥手动画互相干扰。
+ * 写在 celebrating / main-receiving 之后：同特异性后写生效，
+ * 失败视觉压过瞬时 celebrating 的开心表情，挥手期间保持 😢 低头。 */
+.agent-card.task-failed .office-head-active { display: none; }
+.agent-card.task-failed .office-head-idle { display: none; }
+.agent-card.task-failed .office-head-sad { display: none; }
+.agent-card.task-failed .office-head-happy { display: none; }
+.agent-card.task-failed .office-head-sub { display: none; }
+.agent-card.task-failed .office-head-fail { display: block; }
+
+/* 失败：小人变红 + 头低垂 + 红色辉光（emoji 彩色字形 stroke 无效，用 drop-shadow） */
+.agent-card.task-failed .office-head {
+  filter: drop-shadow(0 0 3px rgba(var(--failed-rgb), 0.85));
+  transform: translateY(2.5px);
+}
+.agent-card.task-failed .office-body { stroke: var(--failed); }
+
+/* 失败卡片：边框转红 + 整体抖动一次（复用 shakeOnce） */
+.agent-card.task-failed {
+  border-color: rgba(var(--failed-rgb), 0.55);
+}
+.agent-card.task-failed .card-wrap {
+  animation: shakeOnce 0.45s ease;
+}
 
 /* thinking：屏幕缓慢呼吸闪光（模拟思考 / 打字） */
 .agent-card.status-thinking .pc-screen-glow {
@@ -745,12 +802,17 @@ body {
   font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
 }
 
-/* 火柴人头部双层 emoji（结构见 app.js STICKMAN_SVG）：
+/* 火柴人头部三层 emoji（结构见 app.js STICKMAN_SVG）：
  * 派发（toSub）默认显示 😎（主 Agent 派人送文件）；
- * 交回汇报（backToMain，.flip 镜像翻转）切换为 😄（子 Agent 完成交回）。 */
+ * 交回汇报（backToMain，.flip 镜像翻转）按子 Agent 最终状态切换：
+ * done（.report）→ 😄 + 带回绿勾；failed（.failed）→ 😢 不带绿勾。
+ * report / fail 层均默认隐藏，由 .flip.report / .flip.failed 显式切换，
+ * 保证失败汇报不残留成功表情（方案 A）。 */
 .stick-head-report { display: none; }
+.stick-head-fail { display: none; }
 .stickman-runner.flip .stick-head-run { display: none; }
-.stickman-runner.flip .stick-head-report { display: block; }
+.stickman-runner.flip.report .stick-head-report { display: block; }
+.stickman-runner.flip.failed .stick-head-fail { display: block; }
 
 /* 跑回主 Agent 汇报：镜像翻转（面向左） */
 .stickman-runner.flip { transform: scaleX(-1); }
@@ -849,7 +911,8 @@ body {
   to   { opacity: 1; transform: none; }
 }
 
-/* 主 Agent 接住文件：绿色"收到"外发光闪现 + 边框短暂变绿（约 2.5s 后由 JS 移除） */
+/* 主 Agent 接住文件（子 Agent 完成）：绿色"收到"外发光闪现 + 边框短暂变绿
+ * （约 2.5s 后由 JS 移除） */
 .agent-card.received-flash {
   animation: receivedGlow 1.2s ease 1;
   border-color: rgba(34, 197, 94, 0.6);
@@ -858,6 +921,17 @@ body {
 @keyframes receivedGlow {
   0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.55); }
   100% { box-shadow: 0 0 0 24px rgba(34, 197, 94, 0); }
+}
+
+/* 主 Agent 收到失败汇报（方案 A）：红色"驳回"外发光闪现 + 边框短暂变红 */
+.agent-card.received-flash-fail {
+  animation: receivedGlowFail 1.2s ease 1;
+  border-color: rgba(239, 68, 68, 0.6);
+}
+
+@keyframes receivedGlowFail {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  100% { box-shadow: 0 0 0 24px rgba(239, 68, 68, 0); }
 }
 
 /* ---------- 10f. 子 Agent 完成庆祝（done） ---------- */
@@ -903,49 +977,74 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 12. history 轨迹 ---------- */
-.history-block { margin-top: 14px; }
-
-.history-title {
-  font-size: 11px;
-  color: var(--muted-2);
-  letter-spacing: 0.08em;
-  margin-bottom: 6px;
-}
-
-.history-items {
+/* ---------- 12. 元信息行 ---------- */
+.meta-line {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 6px 18px;
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: var(--muted);
 }
 
-.history-pill {
+.meta-line .meta-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
-  border-radius: 6px;
-  font-size: 12px;
+}
+
+.meta-line b {
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 12b. 最近工具（简化版，仅 tool:xxx 条目） ---------- */
+/* 卡片固定高度布局下作为最后一个伸缩块：内容超出时内部滚动，不撑破卡片 */
+.tool-block {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.tool-block-title {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  letter-spacing: 0.08em;
+  margin-bottom: 3px;
+  flex-shrink: 0;
+}
+
+.tool-items {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;           /* 工具条数多时内部滚动 */
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.tool-chip {
+  display: block;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-family: "Cascadia Code", Consolas, "Courier New", monospace;
   color: #c3cbd9;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border);
+  white-space: nowrap;        /* 单条工具名过长用省略号，不换行挤压 */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.history-pill i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-
-.history-pill i.k-tool  { background: var(--tool); }
-.history-pill i.k-think { background: var(--thinking); }
-.history-pill i.k-start { background: var(--asking); }
-.history-pill i.k-done  { background: var(--done); }
-
-.history-none {
+.tool-none {
   color: var(--muted-2);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 /* ---------- 13. 子 Agent 离场（拜拜 + 淡出） ---------- */
@@ -977,7 +1076,7 @@ body {
 .app-footer {
   max-width: 1240px;
   margin: 0 auto;
-  padding: 0 28px 26px;
+  padding: 0 28px 4px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -986,22 +1085,25 @@ body {
   color: var(--muted-2);
 }
 
-.updated-at { font-variant-numeric: tabular-nums; }
+.updated-at {
+  font-variant-numeric: tabular-nums;
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted-2);
+  letter-spacing: 0.02em;
+}
 
 /* ---------- 15. 响应式 ---------- */
-/* 窄屏：两栏变一栏，主 Agent 在上、子 Agent 在下；卡片保持 380px 上限不拉伸。
- * 断点 960px：保证双栏区间内跑道 ≥100px（380+100+380+两侧 32px 留白 = 924px，
- * 加上滚动条余量取整到 960），低于该宽度单栏更稳妥。 */
+/* 窄屏：保持两列布局，卡片宽度固定380px。
+ * 确保主 Agent 和子 Agent 始终在不同列。 */
 @media (max-width: 960px) {
   .board-wrap {
-    grid-template-columns: 1fr;   /* 单栏 */
-    gap: 100px;                   /* 上下两节的纵向间距 */
+    grid-template-columns: 380px minmax(80px, 180px) 380px;   /* 两栏固定380px + 跑道 */
+    padding: 0 16px;
   }
-  /* 单栏下两栏都放第 1 列（覆盖桌面端的第 3 列定位，避免隐式轨道） */
-  .board-left, .board-right { grid-column: 1; }
-  /* 单栏时主卡片不纵向拉伸（恢复正常高度），宽度上限 380px */
   .main-agent-grid { max-width: 380px; }
-  .agent-grid { grid-template-columns: minmax(0, 380px); }
+  .agent-grid { grid-template-columns: 380px; }
 }
 
 @media (max-width: 760px) {

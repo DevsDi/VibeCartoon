@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server/server.mjs"
+    "start": "node server/server.mjs",
+    "test": "node tests/run.mjs",
+    "test:cleanup": "node tests/cleanup.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }

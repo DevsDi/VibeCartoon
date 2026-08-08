@@ -1,0 +1,512 @@
+{
+  "startedAt": "2026-08-08T09:23:59.570Z",
+  "opts": {
+    "only": null,
+    "headless": true,
+    "keepEvents": false
+  },
+  "cases": [
+    {
+      "name": "01-失败流程(方案A)",
+      "spec": "失败→红色✕+😢+红辉光/抖动；交回😢不带绿勾；main 不显示😄；状态区❌无spinner",
+      "results": [
+        {
+          "desc": "F2 失败前基线：tool 状态有蓝色 spinner",
+          "pass": true,
+          "expected": true,
+          "actual": true,
+          "note": "方案A前提：失败后应不再停留 spinner"
+        },
+        {
+          "desc": "F3 卡片进入失败视觉(task-failed)",
+          "pass": true,
+          "expected": "task-failed",
+          "actual": "agent-card,enter,task-assigned,status-tool,status-flash,task-failed,is-leaving",
+          "note": ""
+        },
+        {
+          "desc": "F4 状态区显示 ❌ 表情",
+          "pass": true,
+          "expected": "❌",
+          "actual": "❌",
+          "note": "方案A：状态区 ❌"
+        },
+        {
+          "desc": "F5 状态标签为「失败」",
+          "pass": true,
+          "expected": "失败",
+          "actual": "失败",
+          "note": ""
+        },
+        {
+          "desc": "F6 红色 ✕（failed-x）",
+          "pass": true,
+          "expected": true,
+          "actual": true,
+          "note": "方案A：卡片显示红色 ✕"
+        },
+        {
+          "desc": "F7 蓝色 spinner 已消失",
+          "pass": true,
+          "expected": false,
+          "actual": false,
+          "note": "方案A：失败后不再停留调用工具中 spinner"
+        },
+        {
+          "desc": "F8 失败表情显示 😢",
+          "pass": true,
+          "expected": [
+            "😢"
+          ],
+          "actual": [
+            "😢"
+          ],
+          "note": "方案A：失败表情😢"
+        },
+        {
+          "desc": "F9 红色辉光（head drop-shadow）",
+          "pass": true,
+          "expected": "filter 含 drop-shadow",
+          "actual": "drop-shadow(rgba(239, 68, 68, 0.85) 0px 0px 3px)",
+          "note": "方案A：失败红色辉光"
+        },
+        {
+          "desc": "F10 卡片抖动（shakeOnce）",
+          "pass": true,
+          "expected": "shakeOnce",
+          "actual": "shakeOnce",
+          "note": "方案A：失败抖动"
+        },
+        {
+          "desc": "F11 交回火柴人出现",
+          "pass": true,
+          "expected": "flip 火柴人",
+          "actual": "在",
+          "note": ""
+        },
+        {
+          "desc": "F12 交回火柴人头部表情 😢",
+          "pass": true,
+          "expected": [
+            "😢"
+          ],
+          "actual": [
+            "😢"
+          ],
+          "note": "方案A：失败交回显示😢"
+        },
+        {
+          "desc": "F13 交回火柴人不带绿勾",
+          "pass": true,
+          "expected": "opacity 0",
+          "actual": "0",
+          "note": "方案A：失败交回不带绿勾"
+        },
+        {
+          "desc": "F14 main 不显示😄(失败交回)",
+          "pass": true,
+          "expected": "采样窗口内从不显示😄",
+          "actual": "未出现😄",
+          "note": "方案A：main 接收失败显示😟或保持默认+红色闪光"
+        },
+        {
+          "desc": "F15 main 接收失败显示😟/红闪",
+          "pass": true,
+          "expected": "😟 或 received-flash-fail",
+          "actual": "😟=true 红闪=true",
+          "note": "方案A：main-receiving-fail 显示😟+红色驳回闪光"
+        },
+        {
+          "desc": "F16 失败卡离场消失",
+          "pass": true,
+          "expected": "DOM 移除",
+          "actual": true,
+          "note": "失败卡挥手拜拜→淡出→移除"
+        }
+      ],
+      "passed": 15,
+      "total": 15
+    },
+    {
+      "name": "02-快速任务重叠(方案B)",
+      "spec": "快速任务(<7s完成)不出现😟😄双层重叠；celebrating/leaving-done 隐藏 sad 层",
+      "results": [
+        {
+          "desc": "B2 全程无双重层表情",
+          "pass": true,
+          "expected": "任意时刻 ≤1 个",
+          "actual": "最大重叠 1",
+          "note": "方案B：快速任务不出现😟😄双层"
+        },
+        {
+          "desc": "B3 庆祝/等待阶段仅 😄",
+          "pass": true,
+          "expected": "样本均为😄",
+          "actual": "[\"😄\"]",
+          "note": "celebrating 期间只显示😄"
+        },
+        {
+          "desc": "B4 拜拜阶段仅 😄",
+          "pass": true,
+          "expected": "样本均为😄",
+          "actual": "[\"😄\"]",
+          "note": "leaving-done 期间只显示😄"
+        },
+        {
+          "desc": "B5 快速任务卡最终消失",
+          "pass": true,
+          "expected": "DOM 移除(≤17s)",
+          "actual": "已移除(t=13873ms)",
+          "note": "离场完整结束"
+        }
+      ],
+      "passed": 4,
+      "total": 4
+    },
+    {
+      "name": "03-😟时序(方案C)",
+      "spec": "task-assigned(😟) 在子卡出现时即显示，不等火柴人到达(5s)",
+      "results": [
+        {
+          "desc": "C2 卡片出现后 2.5s 内显示 😟",
+          "pass": true,
+          "expected": "≤2.5s 内 task-assigned+😟",
+          "actual": "实际 7ms",
+          "note": "方案C：😟在子卡出现时即显示。当前实现挂在火柴人到达(totalMs≈5s)后才添加"
+        },
+        {
+          "desc": "C3 😟 约3.5s后恢复",
+          "pass": true,
+          "expected": "持续≥3s后移除",
+          "actual": "持续 3415ms",
+          "note": "task-assigned 3.5s 生命周期"
+        }
+      ],
+      "passed": 2,
+      "total": 2
+    },
+    {
+      "name": "04-交接时序(方案D)",
+      "spec": "done 后延迟至火柴人交回(约5s)才拜拜；done 后≥4s 卡片还在；交接同屏",
+      "results": [
+        {
+          "desc": "D2 done 后 4s 卡片仍在",
+          "pass": true,
+          "expected": "4s 时在场",
+          "actual": "在",
+          "note": "方案D：done 后至少 4s 卡片还在"
+        },
+        {
+          "desc": "D3 done 后 5s 卡片仍在(交接同屏)",
+          "pass": true,
+          "expected": "5s 时在场",
+          "actual": "在",
+          "note": "方案D：火柴人交回时子卡未离场完毕"
+        },
+        {
+          "desc": "D4 拜拜延迟至交回后(≥6.5s 才 is-leaving)",
+          "pass": true,
+          "expected": "is-leaving 不早于 6.5s",
+          "actual": "is-leaving 起始≈7000ms",
+          "note": "方案D：离场延迟到火柴人交回(约5s)后"
+        },
+        {
+          "desc": "D5 拜拜期间仅 😄",
+          "pass": true,
+          "expected": "样本均为😄",
+          "actual": "[\"😄\"]",
+          "note": "leaving-done 保持开心表情"
+        },
+        {
+          "desc": "D6 卡片最终移除",
+          "pass": true,
+          "expected": "DOM 移除",
+          "actual": "已移除(t=14014ms)",
+          "note": "离场完整结束"
+        }
+      ],
+      "passed": 5,
+      "total": 5
+    },
+    {
+      "name": "05-main假待机(方案E)",
+      "spec": "main 阻塞等待子Agent(thinking/tool)时不待机；其余超时才待机",
+      "results": [
+        {
+          "desc": "E1 环境：main 卡存在",
+          "pass": true,
+          "expected": "存在",
+          "actual": "存在(注入前=思考中)",
+          "note": ""
+        },
+        {
+          "desc": "E2 非等待态+60s无事件 → 待机中😴",
+          "pass": true,
+          "expected": "status-idle/待机中",
+          "actual": "待机中",
+          "note": "方案E：超时判定路径（当前行为基线）"
+        },
+        {
+          "desc": "E3 新事件自动唤醒",
+          "pass": true,
+          "expected": "非 idle",
+          "actual": "思考中",
+          "note": "方案E：有新事件自动恢复真实状态"
+        },
+        {
+          "desc": "E4 有存活子Agent时 main 不待机",
+          "pass": true,
+          "expected": "非 status-idle（显示真实状态）",
+          "actual": "status-tool,status-flash",
+          "note": "方案E：main 阻塞等待子Agent时不显示待机"
+        },
+        {
+          "desc": "E5 收尾：main 恢复真实状态",
+          "pass": true,
+          "expected": "非 idle",
+          "actual": "思考中",
+          "note": "清除测试副作用"
+        }
+      ],
+      "passed": 5,
+      "total": 5
+    },
+    {
+      "name": "06-成功回归(完整流程)",
+      "spec": "派发→工作→完成😄→交回→main接收😄→拜拜消失，各表情按预期切换且不重叠",
+      "results": [
+        {
+          "desc": "S2 派发火柴人出现(toSub)",
+          "pass": true,
+          "expected": "toSub 火柴人",
+          "actual": "在",
+          "note": "任务派发动画"
+        },
+        {
+          "desc": "S3 工作状态(调用工具中+spinner)",
+          "pass": true,
+          "expected": "tool+spinner",
+          "actual": "调用工具中",
+          "note": ""
+        },
+        {
+          "desc": "S4 思考状态(🔍)",
+          "pass": true,
+          "expected": "thinking",
+          "actual": "思考中",
+          "note": ""
+        },
+        {
+          "desc": "S5 完成进入离场(leaving-done+celebrating)",
+          "pass": true,
+          "expected": "celebrating+leaving-done",
+          "actual": "celebrating,leaving-done",
+          "note": "done 离场时序"
+        },
+        {
+          "desc": "S6 庆祝阶段显示 😄",
+          "pass": true,
+          "expected": "含😄",
+          "actual": "[\"😄\"]",
+          "note": "celebrating 表情"
+        },
+        {
+          "desc": "S7 交回火柴人出现(flip)",
+          "pass": true,
+          "expected": "flip 火柴人",
+          "actual": "在",
+          "note": "完成交回动画"
+        },
+        {
+          "desc": "S7b 交回火柴人 😄+绿勾",
+          "pass": true,
+          "expected": "😄 + opacity1",
+          "actual": "😄/1",
+          "note": "done 交回带绿勾"
+        },
+        {
+          "desc": "S8 成功流程全程无双层表情",
+          "pass": true,
+          "expected": "任意时刻 ≤1 个",
+          "actual": "最大重叠 1",
+          "note": "celebrating/leaving-done 隐藏 sad 层"
+        },
+        {
+          "desc": "S9 main 接收显示 😄",
+          "pass": true,
+          "expected": "main-receiving 期间显示😄",
+          "actual": "😄",
+          "note": "main-receiving 表情"
+        },
+        {
+          "desc": "S10 完成卡拜拜消失",
+          "pass": true,
+          "expected": "DOM 移除",
+          "actual": true,
+          "note": "离场完整流程"
+        }
+      ],
+      "passed": 10,
+      "total": 10
+    },
+    {
+      "name": "07-reduced-motion(降级)",
+      "spec": "reduced-motion 下无火柴人/无庆祝粒子，功能(出现/完成/离场)正常",
+      "results": [
+        {
+          "desc": "R2 无火柴人动画",
+          "pass": true,
+          "expected": 0,
+          "actual": 0,
+          "note": "reduced-motion 不创建火柴人"
+        },
+        {
+          "desc": "R3 无庆祝粒子",
+          "pass": true,
+          "expected": 0,
+          "actual": 0,
+          "note": "reduced-motion 跳过庆祝"
+        },
+        {
+          "desc": "R4 功能正常：完成离场",
+          "pass": true,
+          "expected": "leaving-done",
+          "actual": "agent-card,enter,status-queued,task-assigned,leaving-done,is-leaving",
+          "note": ""
+        },
+        {
+          "desc": "R5 离场期间表情 ≤1 个",
+          "pass": true,
+          "expected": "≤1",
+          "actual": "已消失",
+          "note": "reduced-motion 下不追加 task-assigned，无😟😄重叠"
+        },
+        {
+          "desc": "R6 离场消失",
+          "pass": true,
+          "expected": "DOM 移除",
+          "actual": true,
+          "note": "拜拜→淡出→移除完整"
+        }
+      ],
+      "passed": 5,
+      "total": 5
+    },
+    {
+      "name": "08-表情显隐互斥(CSS组合)",
+      "spec": "celebrating/task-assigned/is-leaving/main-receiving(-fail) 叠加时仅一个表情可见",
+      "results": [
+        {
+          "desc": "G2 task-assigned → 仅😟",
+          "pass": true,
+          "expected": [
+            "😟"
+          ],
+          "actual": [
+            "😟"
+          ],
+          "note": "方案C：接任务显示😟"
+        },
+        {
+          "desc": "G3 task-assigned+celebrating → 仅😄",
+          "pass": true,
+          "expected": [
+            "😄"
+          ],
+          "actual": [
+            "😄"
+          ],
+          "note": "方案B：celebrating 隐藏 sad 层"
+        },
+        {
+          "desc": "G4 task-assigned+leaving-done → 仅😄",
+          "pass": true,
+          "expected": [
+            "😄"
+          ],
+          "actual": [
+            "😄"
+          ],
+          "note": "方案B：leaving-done 隐藏 sad 层"
+        },
+        {
+          "desc": "G5 task-failed 叠加最高优先 → 仅😢",
+          "pass": true,
+          "expected": [
+            "😢"
+          ],
+          "actual": [
+            "😢"
+          ],
+          "note": "方案A：失败视觉压过庆祝/翻脸"
+        },
+        {
+          "desc": "G6 main接收+待机 → 仅😄",
+          "pass": true,
+          "expected": [
+            "😄"
+          ],
+          "actual": [
+            "😄"
+          ],
+          "note": "main-receiving 优先级最高，显式隐藏 idle 层"
+        },
+        {
+          "desc": "G7 main接收失败+待机 → 仅😟",
+          "pass": true,
+          "expected": [
+            "😟"
+          ],
+          "actual": [
+            "😟"
+          ],
+          "note": "方案A：main-receiving-fail 显示😟"
+        }
+      ],
+      "passed": 6,
+      "total": 6
+    },
+    {
+      "name": "09-同id复活不误删(方案F)",
+      "spec": "离场中的同 id 复活：新卡不被旧离场定时器误删，功能正常",
+      "results": [
+        {
+          "desc": "F2 同id复活：新卡渲染为 queued",
+          "pass": true,
+          "expected": "新卡 status-queued",
+          "actual": "agent-card,status-queued,task-assigned,celebrating,leaving-done",
+          "note": "方案F：离场中同id复活新建卡片"
+        },
+        {
+          "desc": "F3 新卡未被旧定时器误删",
+          "pass": true,
+          "expected": "旧卡移除时刻后新卡仍在",
+          "actual": "在",
+          "note": "方案F：旧离场定时器只删旧 DOM，不误删新卡"
+        },
+        {
+          "desc": "F4 新卡功能正常：完成离场",
+          "pass": true,
+          "expected": "leaving-done",
+          "actual": "agent-card,status-queued,celebrating,leaving-done",
+          "note": "复活卡走完整成功流程"
+        },
+        {
+          "desc": "F5 复活卡最终离场消失",
+          "pass": true,
+          "expected": "DOM 移除",
+          "actual": true,
+          "note": "复活卡拜拜→淡出→移除"
+        }
+      ],
+      "passed": 4,
+      "total": 4
+    }
+  ],
+  "finishedAt": "2026-08-08T09:25:52.155Z",
+  "summary": {
+    "pass": 56,
+    "fail": 0,
+    "cases": 9
+  }
+}

@@ -22,6 +22,7 @@
       <div class="brand">
         <h1 class="brand-title">Vibe <span class="brand-accent">Agent</span> Dashboard</h1>
         <p class="brand-subtitle">Claude Code 各 Agent 工作进度</p>
+        <span id="updated-at" class="updated-at">—</span>
       </div>
     </div>
   </header>
@@ -45,7 +46,7 @@
         </div>
         <div class="board-right">
           <div class="board-right-title">子 Agent</div>
-          <p id="no-active-note" class="no-active-note hidden">当前没有进行中的子 Agent。</p>
+          <p id="no-active-note" class="no-active-note hidden" style="display:none">当前没有进行中的子 Agent。</p>
           <div id="active-grid" class="agent-grid" aria-label="子 Agent"></div>
         </div>
       </section>
@@ -55,8 +56,6 @@
 
   <!-- ====================== 页脚 ====================== -->
   <footer class="app-footer">
-    <span class="footer-note">每 0.6 秒自动刷新</span>
-    <span id="updated-at" class="updated-at">—</span>
   </footer>
 
   <script src="app.js"></script>
