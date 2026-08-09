@@ -149,6 +149,39 @@ suite("正常事件原样透传（hook 归一化，字段不被误删/误脱敏�
 });
 
 // ---------------------------------------------------------------------------
+// 3.1) 自动同步新增字段抽取：transcriptPath / toolUseId 首层提取且不进 detail
+// ---------------------------------------------------------------------------
+suite("新增字段抽取：transcriptPath / toolUseId 独立首层字段且不进 detail", () => {
+  const TP = "C:\\Users\\1\\.claude\\projects\\D--workspace-Vibe-Cartoon-vc-dashboard\\session-e2e.jsonl";
+  const payload = {
+    hook: "SubagentStart",
+    agent_id: "e2e-transcript",
+    agent_type: "Task",
+    transcript_path: TP,
+    tool_use_id: "call_00_e2e_tool_12345",
+    prompt: "测试转录字段抽取",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.transcriptPath, TP, "transcript_path 应映射到 transcriptPath 首层字段");
+  assert.strictEqual(r.line.toolUseId, "call_00_e2e_tool_12345", "tool_use_id 应映射到 toolUseId 首层字段");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("transcript_path" in d), "transcript_path 不应重复出现在 detail");
+  assert.ok(!("tool_use_id" in d), "tool_use_id 不应重复出现在 detail");
+  assert.strictEqual(d.prompt, "测试转录字段抽取", "其余字段仍保留在 detail");
+});
+
+suite("新增字段空值：无 transcript_path / tool_use_id 不应填充", () => {
+  const r = runCollect(JSON.stringify({ hook: "PreToolUse", agent_id: "e2e-x", tool_name: "Read" }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.transcriptPath, null, "无 transcript_path 应为 null");
+  assert.strictEqual(r.line.toolUseId, null, "无 tool_use_id 应为 null");
+});
+
+// ---------------------------------------------------------------------------
 // 4) 字段名黑名单脱敏
 // ---------------------------------------------------------------------------
 suite("字段名黑名单脱敏：api_key / private_key / access_key / aws_session_token → [REDACTED]", () => {

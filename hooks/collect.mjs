@@ -162,6 +162,9 @@ function buildLine(payload) {
     "agent_type", "subagent_type",
     "tool_name", "tool", "tool_use",
     "status", "tok", "total_tokens", "usage",
+    // 自动同步（T2）：transcript_path / tool_use_id 独立抽取为首层字段，供
+    // 服务端登记转录会话注册表（T3）与增量读转录（T5）；不进 detail 避免二次冗余。
+    "transcript_path", "tool_use_id",
   ]);
 
   const agent = payload.agent_id ?? payload.subagent_id ?? payload.agent ?? null;
@@ -202,6 +205,12 @@ function buildLine(payload) {
     if (detail.length > DETAIL_CAP) detail = truncateCodePoints(detail, DETAIL_CAP) + "…[truncated]";
   }
 
+  // 自动同步（T2）：transcript_path（hook payload 顶层，SubagentStart/SubagentStop 携带）→
+  // 首层字段 transcriptPath；tool_use_id（pre/post_tool_use payload 顶层）→ 首层字段 toolUseId。
+  // 服务端据此登记转录会话注册表、增量读转录文件，与看板状态机对账收敛。
+  const transcriptPath = payload.transcript_path ?? null;
+  const toolUseId = payload.tool_use_id ?? null;
+
   return {
     ts: new Date().toISOString(),
     hook,
@@ -211,6 +220,8 @@ function buildLine(payload) {
     status: status != null ? String(status) : null,
     detail,
     tok,
+    transcriptPath: transcriptPath ? String(transcriptPath) : null,
+    toolUseId: toolUseId ? String(toolUseId) : null,
   };
 }
 

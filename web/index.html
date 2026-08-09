@@ -30,6 +30,8 @@
 
       <!-- 顶部操作区：动效固定跟随系统、音效默认开启，仅保留音效启用轻提示 -->
       <div class="header-actions">
+        <!-- 同步按钮（T10）：手动同步子 Agent 与 Claude Code 状态一致，点击后发起请求 -->
+        <button type="button" id="sync-btn" class="sync-btn" title="同步子 Agent 与 Claude Code 状态一致">🔄 同步</button>
         <!-- 音效启用轻提示（P1）：仅首次访问且尚未点击页面时显示；点击页面任意位置或 ✕ 后淡出移除（见 app.js） -->
         <div id="sound-tip" class="sound-tip hidden">
           <span class="sound-tip-text">🔊 点击页面启用完成音效</span>

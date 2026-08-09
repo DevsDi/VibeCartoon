@@ -151,6 +151,8 @@
     // P1：aria-live 播报区 / 音效启用轻提示（动效与音效为固定策略，无用户控件）
     els.liveRegion = document.getElementById('status-live');
     els.soundTip = document.getElementById('sound-tip');
+    // 同步按钮（T10）：顶部操作区静态按钮，收集引用供 onSyncClick 绑定与禁用
+    els.syncBtn = document.getElementById('sync-btn');
 
     // 音效解锁（autoplay 政策）：加载即创建一次 suspended 的 AudioContext（不发声，合法），
     // 任一用户交互（点击/触摸/按键）时 resume 解锁。无交互时 playChime 保持静默（默认不打扰），
@@ -164,6 +166,9 @@
       const tipClose = els.soundTip.querySelector('[data-close]');
       if (tipClose) tipClose.addEventListener('click', hideSoundTip);
     }
+
+    // 同步按钮（T10）：顶部操作区静态 DOM 不随轮询重建，直接绑定点击事件
+    if (els.syncBtn) els.syncBtn.addEventListener('click', onSyncClick);
 
     // 停止按钮：事件委托到子 Agent 网格（按钮 DOM 随轮询重建，委托避免重复绑定）
     els.activeGrid.addEventListener('click', onStopClick);
@@ -285,6 +290,7 @@
    * 存在但处于 suspended（极少数）时先尝试 resume，能否出声交由浏览器裁决，失败静默不报错。 */
   function playChime(kind) {
     if (isMotionReduced()) return;   // 系统 reduced-motion 时同步静音
+    if (kind !== 'done') return;     // 仅保留完成欢呼音效，关闭失败等其他音效
     if (!audioCtx) return;           // 无 WebAudio 支持，静默降级
 
     function scheduleNotes() {
@@ -428,6 +434,79 @@
           cur.disabled = false;
         }
       }
+    });
+  }
+
+  /* ---------------- 同步子 Agent 与 Claude Code ----------------
+   * 手动触发一次状态同步：POST /api/sync，后端比对 agent.json 与 events.jsonl，
+   * 回填缺失 Agent、修复僵尸（agent.json 存在但会话已结束）、删除已结束记录，
+   * 返回 { ok, updatedAt, agents, summary, sync }（sync 内含
+   * ok / degraded / scannedSessions / transcriptRead / backfilled / fixedZombies / removed）。
+   * 同步不产生 events.jsonl 事件，SSE 不会自动触发 poll——成功后必须显式调用
+   * poll() 立即刷新看板。失败仅 console 提示并恢复按钮，不阻断轮询。 */
+  async function requestSync() {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT);
+    try {
+      const res = await fetch('/api/sync', {
+        method: 'POST', cache: 'no-store', signal: ctrl.signal
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(function () { return null; });
+      return (data && data.ok) ? data : null;
+    } catch (err) {
+      return null;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  /* 同步按钮复原：去除 busy 状态并恢复默认文案（约 4s 后，见 onSyncClick） */
+  function resetSyncBtnText(btn) {
+    if (!btn) return;
+    btn.classList.remove('busy');
+    btn.textContent = '🔄 同步';
+  }
+
+  function onSyncClick() {
+    if (!els.syncBtn || els.syncBtn.disabled) return;
+    const btn = els.syncBtn;
+    btn.disabled = true;             // 立即禁用防重复点击
+    btn.classList.add('busy');       // 同步中样式（脉冲动画，见 style.css）
+    btn.textContent = '🔄 同步中…';
+    // 无论成功失败，5 秒后自动恢复按钮可点（disabled 按钮不触发 click，定时器不会叠加）
+    setTimeout(function () { btn.disabled = false; }, 5000);
+    requestSync().then(function (data) {
+      if (!data || !data.sync || !data.sync.ok) {
+        // 失败：console 提示 + 立即复原文案（disabled 恢复交给 5s 定时器），不阻断轮询
+        console.warn('[vc-dashboard] 同步子 Agent 请求失败');
+        resetSyncBtnText(btn);
+        announce('同步失败');
+        return;
+      }
+      // 同步不产生 events.jsonl 事件，SSE 不会自动触发 poll，必须显式立即刷新
+      poll();
+      // 反馈文案（T11）：完成显示"✓ 已同步"，有变更时附上回填/修复/删除统计
+      const sync = data.sync;
+      const backfilled = sync.backfilled || 0;
+      const fixedZombies = sync.fixedZombies || 0;
+      const removed = sync.removed || 0;
+      let label = '✓ 已同步';
+      let msg = '同步完成';
+      if (backfilled + fixedZombies + removed > 0) {
+        label += '（回填' + backfilled + '/修复' + fixedZombies + '/删除' + removed + '）';
+        msg += '：回填 ' + backfilled + ' 个、修复 ' + fixedZombies + ' 个、删除 ' + removed + ' 个';
+      }
+      if (sync.degraded) {
+        // 降级提示（claude 不可用）：按钮附 ⚠ 标记，aria-live 播报区给出说明
+        label += ' ⚠ 降级';
+        msg += '；claude 不可用，已降级处理';
+      }
+      btn.textContent = label;
+      // 完成反馈展示约 4s 后复原默认文案
+      setTimeout(function () { resetSyncBtnText(btn); }, 4000);
+      // 结果写入 aria-live 播报区（#status-live，屏幕阅读器可感知）
+      announce(msg);
     });
   }
 

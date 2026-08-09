@@ -6,6 +6,7 @@
       "agent_id": "subagent-1",
       "agent_type": "Task",
       "prompt": "调研项目目录结构并列出所有 src 下的文件",
+      "transcript_path": "C:\\Users\\1\\.claude\\projects\\D--workspace-Vibe-Cartoon-vc-dashboard\\session-1.jsonl",
       "is_resume": false
     }
   },
@@ -16,7 +17,8 @@
       "agent_id": "subagent-1",
       "agent_type": "Task",
       "tool_name": "Read",
-      "tool_input": { "file_path": "D:/workspace/project/src/main.js" }
+      "tool_input": { "file_path": "D:/workspace/project/src/main.js" },
+      "tool_use_id": "call_00_1a2b3c4d5e6f"
     }
   },
   {
@@ -44,7 +46,8 @@
       "tool_input": { "pattern": "TODO[\\s\\S]+MARK" },
       "tool_response": {
         "result": "src/main.js:3:TODO(xxx) 待重构"
-      }
+      },
+      "tool_use_id": "call_00_9f8e7d6c5b4a"
     }
   },
   {
@@ -61,7 +64,8 @@
       "agent_id": "subagent-1",
       "agent_type": "Task",
       "status": "success",
-      "output": "任务已完成，共处理 3 个文件"
+      "output": "任务已完成，共处理 3 个文件",
+      "transcript_path": "C:\\Users\\1\\.claude\\projects\\D--workspace-Vibe-Cartoon-vc-dashboard\\session-1.jsonl"
     }
   },
   {

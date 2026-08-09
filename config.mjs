@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import os from "node:os";
 
 // 当前模块所在目录，用于定位项目内文件
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,3 +24,19 @@ export const STOP_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
 export const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || `http://localhost:${PORT}`;
 // 允许来源列表：把上面的字符串拆成数组，供服务端逐请求校验 Origin
 export const ALLOWED_ORIGINS = ALLOWED_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+
+// ---------------------------------------------------------------------------
+// 自动同步（T1-T9）：从 Claude Code 转录文件（~/.claude/projects/<slug>/<sessionId>.jsonl）
+// 增量读取，解析出权威的子 Agent 启动/完成状态，与看板 events.jsonl 状态机 diff 收敛。
+// ---------------------------------------------------------------------------
+// 转录文件根目录：Claude Code 默认把每个项目会话的转录写在 ~/.claude/projects/<项目slug>/ 下
+export const TRANSCRIPT_ROOT = path.join(os.homedir(), ".claude", "projects");
+// Claude Code 二进制：默认 "claude"（PATH 解析），可通过环境变量 CLAUDE_BIN 覆盖
+// （如安装位置特殊或使用 claude.cmd 时指定完整路径）
+export const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
+// `claude agents --json` 子进程超时：超时 kill 并降级为注册表模式（默认 5000ms）
+export const SYNC_ENUM_TIMEOUT_MS = 5000;
+// 转录会话注册表条目保留时长：超过该时长仍未刷新（无新事件携带该 transcriptPath）→ 清理（默认 24h）
+export const TRANSCRIPT_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
+// 对账删除阈值：看板有、转录无记录的 Agent，且 lastSeen 超过该时长才允许删除（默认 10 分钟，与 STALE_MS 同级）
+export const SYNC_STALE_REMOVE_MS = 10 * 60 * 1000;

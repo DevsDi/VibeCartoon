@@ -13,6 +13,8 @@ import { stat, open as openFile, readFile, rename, rm } from "node:fs/promises";
 import { appendFileSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { PORT, HOST, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS, ALLOWED_ORIGINS, STOP_SIGNALS_FILE, STOP_REQUEST_TTL_MS } from "../config.mjs";
+// 自动同步（T8/T9）：对账 + 转录会话注册表登记/重建/TTL 清理
+import { reconcile, registerEvent, rebuildRegistryFromEvents, pruneTranscriptRegistry } from "./sync.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -90,14 +92,27 @@ async function closeHandle(fh) {
   try { await fh.close(); } catch { /* 忽略 */ }
 }
 
-// 启动时定位到事件文件末尾：服务重启视为新会话，不重放历史事件
+// 启动时从事件文件头回放历史事件：逐行 processLines/applyEvent 重建 agents Map 真实状态
+// （不再定位到文件末尾丢弃历史，避免重启后看板从空开始、依赖 sync 回填伪造统一时间戳）。
+// 回放完成后 readOffset 停在文件末尾，之后 /api/state、/api/sync 的增量读继续消费新事件。
+// 性能：events.jsonl 一般为几 MB（几千行），一次顺序读取可接受；文件缺失/截断由 readFileRange 内部容错。
 async function initReadOffset() {
+  let size = 0;
   try {
-    const st = await stat(EVENTS_FILE);
-    readOffset = st.size;
-  } catch {
-    readOffset = 0; // 文件不存在：从头开始（文件创建后会增量读）
+    const result = await readFileRange(EVENTS_FILE, 0);
+    size = result.size;
+    if (result.lines.length > 0) {
+      // 逐行复用 processLines（内含 registerEvent 登记转录会话 + applyEvent 状态机重建），
+      // 解析失败/异常的行由 processLines 内部跳过，不中断回放
+      processLines(result.lines);
+      console.log(`[server] 启动回放 ${result.lines.length} 条历史事件，重建 ${agents.size} 个 Agent 状态`);
+    }
+  } catch (err) {
+    // 回放异常不阻塞启动：记录后从文件头增量读（readFileRange 已内部容错文件缺失）
+    console.error("[server] 启动回放历史事件失败:", err?.message ?? err);
+    size = 0;
   }
+  readOffset = size; // 游标停在文件末尾，后续增量读只取新事件
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +167,8 @@ function pushHistory(a, note) {
 function cleanupInactiveAgents() {
   try {
     const now = Date.now();
+    // 转录会话注册表 TTL 清理（T9）：并入同一 60s 定时循环，与 agent 回收共用 Map 无竞态
+    pruneTranscriptRegistry();
     // 顺带清理已失效的停止请求信号（见下方 pruneStopSignals，保持文件小）
     // 必须在 agent 回收循环之前调用：此时 agents Map 仍包含终态（done/failed）agent 的 id，
     // pruneStopSignals 内的 agents.get(id) 能正确判定 "agent 已知但终态" 并清除其信号；
@@ -443,12 +460,21 @@ function applyEvent(e) {
 function processLines(lines) {
   let skipped = 0;
   for (const line of lines) {
-    try {
-      applyEvent(JSON.parse(line));
-    } catch (err) {
+    let e;
+    try { e = JSON.parse(line); } catch (err) {
       // 残缺行（写盘竞态）跳过，记录调试日志便于排查
       skipped++;
       console.debug('[server] 跳过无效事件行:', err.message);
+      continue;
+    }
+    // 转录会话注册表登记（T3 来源一）：事件携带 transcriptPath → 登记对应会话
+    registerEvent(e);
+    try {
+      applyEvent(e);
+    } catch (err) {
+      // applyEvent 内部异常不中断本行处理（防御性兜底），记录后继续
+      console.debug('[server] applyEvent 异常:', err.message);
+      skipped++;
     }
   }
   if (skipped > 0) {
@@ -625,6 +651,51 @@ function handleAgentStop(req, res, agentId) {
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/agents/clear：手动清除全部"僵尸"子 Agent（仅内存态）。
+// 只清理内存 Map（agents / agentNames），不写 events.jsonl、不触碰 pendingDispatch / stopSignals；
+// main 主卡硬性豁免（与 cleanupInactiveAgents 第160-163行、handleAgentStop 第608-609行同一豁免规则）。
+// 遍历用 [...agents] 快照（迭代中删除安全）；同步删 agentNames 避免 agentId 复用后名称误配。
+// 幂等：无子 Agent 可清时 cleared=0 同样返回成功。
+// ---------------------------------------------------------------------------
+function handleClearAgents(req, res) {
+  let cleared = 0;
+  for (const [key] of [...agents]) {
+    if (key === "main") continue;
+    agents.delete(key);
+    agentNames.delete(key);
+    cleared++;
+  }
+  return sendJson(req, res, 200, { ok: true, cleared }, STOP_EXTRA_HEADERS);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/sync：手动触发一次转录对账（T8）。
+// 执行 T7 对账（回填 / 僵尸修复 / 过期删除），返回完整 state + sync 统计。
+// 只读转录与内存 Map，不写 events.jsonl。claude 不可用时 sync.ok=false、
+// sync.degraded=true，仍执行注册表可读部分的收敛（回填/僵尸修复/受条件限制的删除）。
+// 对账删除与 60s 定时回收（cleanupInactiveAgents）同改 agents Map，Node 单线程下无竞态。
+// ---------------------------------------------------------------------------
+async function handleSync(req, res) {
+  // 先推进事件聚合（与 /api/state 一致），让对账基于最新看板状态；再执行对账
+  const lines = await readNewLines();
+  processLines(lines);
+  const syncResult = await reconcile({ agents, agentNames, newAgent, pushHistory });
+
+  const stopRequestedIds = readStopRequestedIds();
+  await maybeRotate();
+  const updatedAt = new Date().toISOString();
+  const all = [...agents.values()];
+  all.sort((x, y) => (x.startTime ?? "").localeCompare(y.startTime ?? ""));
+  return sendJson(req, res, 200, {
+    ok: true,
+    updatedAt,
+    agents: all.map((a) => toAgentView(a, stopRequestedIds)),
+    summary: buildSummary(all),
+    sync: syncResult,
+  }, STOP_EXTRA_HEADERS);
+}
+
+// ---------------------------------------------------------------------------
 // 路由
 // ---------------------------------------------------------------------------
 const server = createServer(async (req, res) => {
@@ -655,9 +726,18 @@ const server = createServer(async (req, res) => {
       return void res.end();
     }
 
-    // 仅放开 POST /api/agents/:id/stop（停止子 Agent 的信号入口），其余非 GET 一律 405
+    // 仅放开 POST /api/agents/:id/stop（停止子 Agent 的信号入口）+ POST /api/agents/clear（手动清除僵尸 Agent），
+    // 其余非 GET 一律 405
     if (req.method !== "GET") {
       if (req.method === "POST") {
+        // 置于最前：/api/agents/clear 不命中下方 stop 正则（stop 要求 /stop 后缀），此判断避免误配
+        if (pathname === "/api/agents/clear") {
+          return handleClearAgents(req, res);
+        }
+        // 转录对账（T8）：放在 /api/agents/clear 判断之后
+        if (pathname === "/api/sync") {
+          return await handleSync(req, res);
+        }
         const m = pathname.match(/^\/api\/agents\/([^/]+)\/stop$/);
         if (m) {
           let agentId;
@@ -781,7 +861,7 @@ async function serveStatic(pathname, res, corsHeaders) {
 // 启动定时清理
 const cleanupTimer = setInterval(cleanupInactiveAgents, CLEANUP_INTERVAL);
 
-// 启动时序：先载入既有停止信号、定位事件文件末尾（不重放历史），再监听端口
+// 启动时序：先载入既有停止信号、回放历史事件重建 agents Map（状态不丢失），再监听端口
 loadStopSignals();
 await initReadOffset();
 server.listen(PORT, HOST, () => {
