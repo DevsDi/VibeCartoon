@@ -256,6 +256,46 @@ body {
   outline-offset: 2px;
 }
 
+/* ---------- 4c. 音效启用轻提示（P1） ---------- */
+/* 首次访问且尚未点击页面时显示（挂在 .header-actions 末尾，随操作区靠右）；
+ * 点击页面任意位置或 ✕ 后淡出移除（见 app.js）。默认带 .hidden 隐藏，
+ * JS 在 init 里按需移除后再显示。 */
+.sound-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(var(--tool-rgb), 0.10);
+  border: 1px solid rgba(var(--tool-rgb), 0.35);
+  white-space: nowrap;
+  transition: opacity 0.24s ease, transform 0.24s ease;
+}
+
+.sound-tip-close {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+
+.sound-tip-close:hover { color: var(--text); }
+
+/* 淡出（JS 加类，过渡结束后移除 DOM） */
+.sound-tip-hide {
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+}
+
 /* ---------- 6. 主体与空状态 ---------- */
 .app-main { padding: 10px 0 6px; }
 

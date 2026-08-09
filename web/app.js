@@ -98,6 +98,8 @@
   const MOTION_KEY = 'vc-motion';
   const SOUND_KEY = 'vc-sound';
   const MOTION_LEVELS = ['auto', 'reduced', 'off'];
+  /* 音效启用轻提示的去重键：仅首次访问（且尚未点击页面）时显示一次 */
+  const SOUND_TIP_KEY = 'vc-sound-tip-seen';
 
   /* SSE 加速刷新（P3）：连接失败连续 3 次后放弃 SSE，回归纯 600ms 轮询兜底 */
   const SSE_MAX_FAILS = 3;
@@ -125,7 +127,7 @@
   /* P1：特效/音效偏好（从 localStorage 读取，默认自动 / 音效开） */
   let motionLevel = 'auto';
   let soundOn = true;
-  let audioCtx = null;            // WebAudio 上下文：首次用户交互后初始化（autoplay 政策）
+  let audioCtx = null;            // WebAudio 上下文：加载即惰性创建（suspended），首次用户交互后 resume 解锁
   /* P3：SSE 加速刷新状态 */
   let sse = null;
   let sseFails = 0;
@@ -159,10 +161,11 @@
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
 
-    // P1：特效密度 / 音效开关控件 / aria-live 播报区
+    // P1：特效密度 / 音效开关控件 / aria-live 播报区 / 音效启用轻提示
     els.motionSelect = document.getElementById('motion-select');
     els.soundToggle = document.getElementById('sound-toggle');
     els.liveRegion = document.getElementById('status-live');
+    els.soundTip = document.getElementById('sound-tip');
     loadPrefs();
     applyMotion();
     els.motionSelect.value = motionLevel;
@@ -170,11 +173,18 @@
     els.soundToggle.checked = soundOn;
     els.soundToggle.addEventListener('change', function () { setSound(els.soundToggle.checked); });
 
-    // 音效解锁（autoplay 政策）：首次用户交互（点击/触摸/按键）后初始化 AudioContext，
-    // 解铃前 playChime 不播任何声音（默认不打扰）
-    document.addEventListener('pointerdown', unlockAudio, { passive: true });
-    document.addEventListener('touchstart', unlockAudio, { passive: true });
-    document.addEventListener('keydown', unlockAudio);
+    // 音效解锁（autoplay 政策）：加载即创建一次 suspended 的 AudioContext（不发声，合法），
+    // 任一用户交互（点击/触摸/按键）时 resume 解锁。无交互时 playChime 保持静默（默认不打扰），
+    // 但用户点过页面一次后，后续 done/failed 提示音必定可用。
+    maybeShowSoundTip();   // 先判断再创建：此刻 audioCtx 仍为 null，可判定"尚未交互"
+    ensureAudio();         // 惰性创建一次（suspended 合法状态，不发声）
+    document.addEventListener('pointerdown', onUserGesture, { passive: true });
+    document.addEventListener('touchstart', onUserGesture, { passive: true });
+    document.addEventListener('keydown', onUserGesture);
+    if (els.soundTip) {
+      const tipClose = els.soundTip.querySelector('[data-close]');
+      if (tipClose) tipClose.addEventListener('click', hideSoundTip);
+    }
 
     // 停止按钮：事件委托到子 Agent 网格（按钮 DOM 随轮询重建，委托避免重复绑定）
     els.activeGrid.addEventListener('click', onStopClick);
@@ -291,9 +301,12 @@
     return false;
   }
 
-  /* WebAudio 上下文初始化（autoplay 政策）：仅在首次用户交互后创建/resume。
+  /* WebAudio 上下文懒加载（autoplay 政策）：
+   * init 时先创建一次 suspended 的 AudioContext（合法且不发声），此后任一用户交互
+   * （点击/触摸/按键）再调用本函数把上下文 resume 解锁。用户点过页面一次后，
+   * 后续完成/失败提示音必定可用；无交互时保持静默（浏览器自动播放策略不可绕过）。
    * 创建失败（无 WebAudio 支持）静默降级，不影响主流程。 */
-  function unlockAudio() {
+  function ensureAudio() {
     if (!audioCtx) {
       try {
         const AC = window.AudioContext || window.webkitAudioContext;
@@ -305,13 +318,46 @@
     }
   }
 
+  /* 首次用户手势（pointerdown / touchstart / keydown）：resume 解锁音频，并收起提示 */
+  function onUserGesture() {
+    ensureAudio();
+    hideSoundTip();
+  }
+
+  /* 音效启用轻提示（P1）：仅首次访问、且尚未点击页面时显示。
+   * 显示判定须在 init 首次 ensureAudio() 之前执行（此刻 audioCtx 仍为 null 表示"尚未交互"）；
+   * 已看过（vc-sound-tip-seen=1）则不重复打扰。 */
+  function maybeShowSoundTip() {
+    if (!els.soundTip || audioCtx) return;
+    let seen = '0';
+    try { seen = localStorage.getItem(SOUND_TIP_KEY) || '0'; } catch (err) { /* 隐私模式等异常忽略 */ }
+    if (seen !== '1') els.soundTip.classList.remove('hidden');
+  }
+
+  /* 收起轻提示：淡出过渡结束后移除 DOM，并记录已看过（每次刷新不再出现） */
+  function hideSoundTip() {
+    if (!els.soundTip || els.soundTip.dataset.done) return;
+    els.soundTip.dataset.done = '1';
+    try { localStorage.setItem(SOUND_TIP_KEY, '1'); } catch (err) { /* 忽略 */ }
+    els.soundTip.classList.add('sound-tip-hide');
+    window.setTimeout(function () {
+      if (els.soundTip && els.soundTip.parentNode) {
+        els.soundTip.parentNode.removeChild(els.soundTip);
+      }
+    }, 260);
+  }
+
   /* 完成/失败提示音（P1，零依赖 WebAudio）：
    * done → 两个短促上升正弦音；failed → 低沉下降音。
-   * 尊重音效开关与动效降级（reduced/off 不播）；未解锁（无用户交互）时不播。 */
+   * 尊重音效开关与动效降级（reduced/off 不播）；audioCtx 为 null（无 WebAudio 支持）不播；
+   * 存在但处于 suspended（极少数）时先尝试 resume，能否出声交由浏览器裁决，失败静默不报错。 */
   function playChime(kind) {
     if (!soundOn) return;
     if (isMotionReduced()) return;   // 降级/关闭特效时同步静音
-    if (!audioCtx) return;           // 尚无用户交互，autoplay 政策未解锁
+    if (!audioCtx) return;           // 无 WebAudio 支持，静默降级
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(function () { /* 忽略拒绝 */ });
+    }
     try {
       const ctx = audioCtx;
       const t0 = ctx.currentTime + 0.02;
