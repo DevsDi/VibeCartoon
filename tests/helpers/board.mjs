@@ -202,3 +202,31 @@ export async function toolScreenAnimSnapshot(page, id) {
     };
   }).catch(() => null);
 }
+
+/** 停止按钮快照（"子 Agent 停止"功能验收契约）。
+ * .agent-card 内 .stop-zone .stop-agent-btn（卡片不存在返回 null）：
+ *   - exists：按钮 DOM 是否存在（.stop-zone 内无按钮 = 未渲染）
+ *   - vis：   按钮计算样式是否可见（离场/移除/超时回收中 CSS display:none 隐藏）
+ *   - text：  按钮文案（存活 = "⏹ 停止"；已停止 = "⏹ 已停止"）
+ *   - disabled：按钮 disabled 态（已停止时为 true）
+ *   - statusStopped：卡片是否挂 .status-stopped（灰化/降饱和）
+ * 契约（实现方已落地于 web/app.js updateStopZone 与 web/style.css）：
+ *   - 存活子 Agent（queued/thinking/tool/asking、非 main、非 done/failed/离场）渲染停止按钮；
+ *   - POST /api/agents/:id/stop 成功 → disabled + 文案含"已停止" + 卡片灰化；
+ *   - /api/state 的 agent.stopRequested=true 时同样显示"已停止"；
+ *   - done/failed/离场/main 卡不渲染可见停止按钮。 */
+export async function stopButtonSnapshot(page, id) {
+  return page.$eval(`.agent-card[data-id="${id}"]`, (el) => {
+    const btn = el.querySelector(".stop-zone .stop-agent-btn");
+    // vis 用布局矩形而不是 getComputedStyle(btn).display：离场/移除时 .stop-zone 有
+    // display:none（祖先隐藏），按钮自身 computed display 仍非 none，需按实际几何判断可见。
+    const vis = btn ? btn.getBoundingClientRect().width > 0 && btn.getBoundingClientRect().height > 0 : false;
+    return {
+      exists: !!btn,
+      vis,
+      text: btn ? btn.textContent.trim() : null,
+      disabled: btn ? btn.disabled : null,
+      statusStopped: el.classList.contains("status-stopped"),
+    };
+  }).catch(() => null);
+}

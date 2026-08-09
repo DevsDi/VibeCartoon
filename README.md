@@ -8,6 +8,7 @@ Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 
 - **完整状态体系**：`queued`（排队中）/ `thinking`（思考中）/ `tool`（调用工具中）/ `asking`（等待输入）/ `done`（已完成）/ `failed`（失败），主 Agent（`main`）常驻左栏且不参与超时回收；任何 Agent 超过 `STALE_MS`（10 分钟）无事件即被服务端回收。
 - **火柴人任务动画**：新子 Agent 出现或主 Agent 补充派发任务时，火柴人手持文件从主 Agent 卡片跑向子 Agent 卡片（toSub，😎）；子 Agent 完成/失败后火柴人跑回主 Agent 汇报（backToMain，done → 😄 带绿勾，failed → 😢 不带勾），并触发「收到 / 驳回」闪光与子卡挥手拜拜离场。首次渲染有 `stickmanSeeded` 守卫，页面刷新不会涌出一堆火柴人。
 - **任务名称解析**：`post_tool_use` 按 `tool_response.agentId` 精确配对子 Agent 名称；`pre_tool_use` 中主 Agent 调用 Agent 工具时登记 `pendingDispatch`（LIFO）作为待消费的任务描述；`subagent_start` 按「精确配对 → LIFO 派发描述 → 事件自带 prompt」三级优先级消费。主 Agent 恒显示「主 Agent」。
+- **子 Agent 停止请求**：存活中的子 Agent（`queued`/`thinking`/`tool`/`asking`）卡片提供「⏹ 停止」按钮，点击向后端发出 `POST /api/agents/:id/stop`，按钮随即变为「⏹ 已停止」并灰化、卡片降饱和；服务端把请求原子追加到独立文件 `data/stop-signals.jsonl`，由外部（主会话）消费该文件执行真实中断。本仓库负责看板侧的「停止请求 + 状态标记」闭环；已 `done`/`failed` 或已离场的 Agent 不提供按钮，主 Agent（`main`）不支持停止。
 - **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。
 - **零运行时依赖**：服务端为纯 Node ESM http server，前端为原生 JS + CSS，无框架、不连外网。
 
@@ -72,6 +73,8 @@ echo '{"hook":"SubagentStart","subagent_id":"demo-1","agent_type":"general"}' | 
 | `EVENTS_FILE` | `<root>/data/events.jsonl` | 事件文件路径 |
 | `COLLECT_LOG` | `<root>/data/collect.log` | 采集器异常日志路径 |
 | `WEB_DIR` | `<root>/web` | 前端静态资源目录 |
+| `STOP_SIGNALS_FILE` | `<root>/data/stop-signals.jsonl` | 停止请求信号文件路径，可通过环境变量 `STOP_SIGNALS_FILE` 覆盖 |
+| `STOP_REQUEST_TTL_MS` | `24 * 60 * 60 * 1000`（24 小时） | 停止信号条目保留时长，清理时移除超时未消费/未匹配的条目 |
 
 ## 目录结构
 
@@ -89,6 +92,7 @@ vc-dashboard/
 │   └── style.css           # 深色主题样式与全部 CSS 动画
 ├── data/                   # 运行期生成（.gitignore）
 │   ├── events.jsonl        # 事件文件（超过 10MB 自动轮转）
+│   ├── stop-signals.jsonl  # 停止请求信号（POST /api/agents/:id/stop 追加，外部主会话消费）
 │   └── collect.log         # 采集器异常日志
 └── tests/                  # E2E 测试（详见 tests/README.md）
     ├── run.mjs             # 测试入口
@@ -101,16 +105,18 @@ vc-dashboard/
 
 ## API 说明
 
-服务端仅接受 GET 请求，其他方法返回 `405`。
+服务端提供只读 GET 接口，另开放 `POST /api/agents/:id/stop` 用于登记「停止子 Agent」请求；除该 POST 外的其他非 GET 方法仍返回 `405`。
 
 | 接口 | 用途 | 返回概要 |
 |---|---|---|
 | `GET /api/health` | 健康检查 | `{ ok: true, fileBytes }`（事件文件当前字节数） |
 | `GET /api/state` | 看板聚合数据 | `{ updatedAt, agents: [...], summary: {...} }` |
 | `GET /api/events` | 原始事件调试 | `{ events: [...], nextOffset }` |
+| `POST /api/agents/:id/stop` | 登记停止子 Agent 请求 | `200 { ok: true, agent }` / `404`（不存在或已离场）/ `409`（已 `done`/`failed` 或主 Agent） |
 
-- `/api/state`：采用「增量读」事件文件 + 状态机聚合。`agents` 为按开始时间升序的全部 Agent，每个 Agent 含 `id / type / name / status / currentTool / toolCount / startTime / endTime / lastSeen / history`（`history` 最多保留最近 6 条状态简记）；`summary` 统计 `total / active / done / queued / thinking / tool / failed / asking` 各档数量。文件被截断或轮转时偏移自动归零重读。
+- `/api/state`：采用「增量读」事件文件 + 状态机聚合。`agents` 为按开始时间升序的全部 Agent，每个 Agent 含 `id / type / name / status / currentTool / toolCount / startTime / endTime / lastSeen / history / stopRequested`（`history` 最多保留最近 6 条状态简记；`stopRequested` 为布尔，表示该 Agent 是否有未失效的停止请求信号）；`summary` 统计 `total / active / done / queued / thinking / tool / failed / asking` 各档数量。文件被截断或轮转时偏移自动归零重读。
 - `/api/events`：调试用，支持 `?since=<offset>` 从指定字节偏移读取原始事件，不推进 `/api/state` 的聚合偏移。
+- `POST /api/agents/:id/stop`：校验 Agent 存在且处于存活态（非 `done`/`failed`/已离场），通过后原子追加一行 JSON 到独立文件 `data/stop-signals.jsonl`（**禁止写 `events.jsonl`**，避免与采集器并发冲突）。信号文件每行格式：`{"ts":"<ISO 时间>","agent":"<子 Agent id>","status":"requested"}`。真实中断由外部（主会话）消费该文件执行；服务端会周期清理「已不在 agents 中 / 已 `done`/`failed` / 超过 `STOP_REQUEST_TTL_MS`」的条目以保持文件小。
 
 ## 测试
 

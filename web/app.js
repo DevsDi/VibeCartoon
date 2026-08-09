@@ -136,6 +136,9 @@
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
 
+    // 停止按钮：事件委托到子 Agent 网格（按钮 DOM 随轮询重建，委托避免重复绑定）
+    els.activeGrid.addEventListener('click', onStopClick);
+
     // 火柴人动画层：固定定位覆盖全屏，挂在 body 末尾，不参与布局
     els.animLayer = document.createElement('div');
     els.animLayer.id = 'anim-layer';
@@ -207,6 +210,54 @@
 
   function setOnline(ok) {
     els.connBanner.classList.toggle('hidden', ok);
+  }
+
+  /* ---------------- 停止子 Agent ----------------
+   * 前端只负责「发起停止请求 + 状态标记」闭环：
+   * 点击 ⏹ 停止 → POST /api/agents/:id/stop → 成功即把卡片置为"已停止"
+   * （按钮 disabled + 文案已停止 + 卡片灰化 status-stopped），
+   * 服务端 stopRequested 在下一轮轮询中继续保持该视觉；
+   * 失败仅 console 提示并恢复按钮，不阻断轮询。 */
+  async function requestAgentStop(id) {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT);
+    try {
+      const res = await fetch('/api/agents/' + encodeURIComponent(id) + '/stop', {
+        method: 'POST', cache: 'no-store', signal: ctrl.signal
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(function () { return null; });
+      return !!(data && data.ok);
+    } catch (err) {
+      return false;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function onStopClick(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.stop-agent-btn') : null;
+    if (!btn || btn.disabled) return;
+    const card = btn.closest('.agent-card');
+    if (!card) return;
+    const id = card.dataset && card.dataset.id;
+    if (!id) return;
+    const rec = activeCards[id];
+    btn.disabled = true; // 立即禁用防重复点击
+    requestAgentStop(id).then(function (ok) {
+      if (ok && rec) {
+        rec.stopSent = true;     // 本地置位：立即显示"已停止"，不必等下一轮轮询
+        rec.stopState = null;    // 强制刷新停止区
+        updateStopZone(rec, rec.agent);
+      } else if (!ok) {
+        console.warn('[vc-dashboard] 停止子 Agent 请求失败：', id);
+        // 失败不阻断轮询：恢复按钮可点（卡片若已离场/移除，交给轮询隐藏）
+        const cur = card.querySelector('.stop-agent-btn');
+        if (cur && !card.classList.contains('is-leaving') && !card.classList.contains('removing')) {
+          cur.disabled = false;
+        }
+      }
+    });
   }
 
   /* ---------------- 主渲染 ---------------- */
@@ -1036,7 +1087,11 @@
       statusArea: el.querySelector('.status-area'),
       elapsedEl: el.querySelector('.elapsed-num'),
       toolsEl: el.querySelector('.tools-num'),
-      toolItems: el.querySelector('.tool-items')
+      toolItems: el.querySelector('.tool-items'),
+      stopZone: el.querySelector('.stop-zone'), // 停止按钮容器（meta-line 内）
+      stopState: 'none',                         // 停止区缓存状态：'none' / 'active' / 'stopped'
+      stopSent: false,                           // 本地是否已发送停止请求（成功前不依赖服务端回显）
+      agent: agent,                // 最近一次渲染的 agent 数据（供停止点击回调使用）
     };
 
     // 1.5s 入场动画结束后移除 enter，避免干扰后续状态闪烁
@@ -1065,6 +1120,7 @@
   function updateCard(rec, agent) {
     const status = effectiveStatus(agent);
     const el = rec.el;
+    rec.agent = agent; // 供停止点击回调读取最新 agent 数据
 
     // 1) 状态变化 → 重建状态区（保证 dot/spinner 动画不被 600ms 重绘打断）+ 边框脉冲一次
     if (rec.status !== status) {
@@ -1111,6 +1167,50 @@
           }).join('')
         : '<span class="tool-none">— 暂无工具 —</span>';
     }
+
+    // 5) 停止按钮：仅存活中的子 Agent 显示；已停止（stopRequested 或本地已发送）→ 禁用 + 灰化
+    updateStopZone(rec, agent);
+  }
+
+  /* 停止按钮渲染（本任务闭环）：
+   * - 存活中的子 Agent（非 main、queued/thinking/tool/asking 之一）→ 显示「⏹ 停止」；
+   * - /api/state 的 stopRequested 为 true，或本地已发送停止请求（rec.stopSent）→ 显示
+   *   「⏹ 已停止」（按钮 disabled + 卡片灰化 status-stopped）；
+   * - 其余（main、done/failed、离场/移除中的子 Agent）→ 隐藏按钮区。
+   * rec.stopState 缓存避免 600ms 轮询反复重建 DOM。 */
+  function updateStopZone(rec, agent) {
+    const zone = rec.stopZone;
+    if (!zone) return;
+    const agentObj = agent || rec.agent;
+    const requested = !!(agentObj && agentObj.stopRequested) || rec.stopSent;
+    let state;
+    if (requested) {
+      state = 'stopped';
+    } else if (canStopAgent(agentObj)) {
+      state = 'active';
+    } else {
+      state = 'none';
+    }
+    if (rec.stopState !== state) {
+      rec.stopState = state;
+      if (state === 'none') {
+        zone.innerHTML = '';
+      } else if (state === 'active') {
+        zone.innerHTML =
+          '<button type="button" class="stop-agent-btn" title="向主会话发送停止该子 Agent 的请求">⏹ 停止</button>';
+      } else {
+        zone.innerHTML = '<button type="button" class="stop-agent-btn" disabled>⏹ 已停止</button>';
+      }
+    }
+    // 卡片整体灰化：stopRequested（服务端回显）或本地已发送停止请求均触发
+    rec.el.classList.toggle('status-stopped', requested);
+  }
+
+  /* 子 Agent 是否处于"存活中"可停止状态（非 main、未 done/failed） */
+  function canStopAgent(agent) {
+    if (!agent || agent.id === 'main') return false;
+    const st = normalizeStatus(agent.status);
+    return st === 'queued' || st === 'thinking' || st === 'tool' || st === 'asking';
   }
 
   /* ---------------- 办公场景（卡片内坐姿小人） ---------------- */
@@ -1193,6 +1293,7 @@
         '<div class="meta-line">' +
           '<span class="meta-item">⏱ <b class="elapsed-num">已用 --:--</b></span>' +
           '<span class="meta-item">🧰 <b class="tools-num">工具 0 次</b></span>' +
+          '<span class="stop-zone"></span>' +
         '</div>' +
         '<div class="tool-block">' +
           '<div class="tool-block-title">最近工具</div>' +

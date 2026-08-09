@@ -51,6 +51,7 @@ node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无�
 | `cases/12-concurrent-queue.mjs` | 批量并发子 Agent 的 toSub 火柴人 FIFO 排队：同一时刻至多 1 个 .stickman-runner、依次出现 | 动画完善-方向A |
 | `cases/13-tool-screen-anim.mjs` | tool 状态且挂 tool-type-* 类时对应 .screen-* 子层 animationName≠none；转 thinking 后层隐藏 | 动画完善-方向C |
 | `cases/14-timeout-leave.mjs` | 超时回收挂 .timeout-leaving（打盹😴→熄灯→淡出）；style.css 选择器静态校验 + 页面内差分断言 | 动画完善-方向B |
+| `cases/15-stop-agent.mjs` | 子 Agent 停止：存活子卡渲染「⏹ 停止」→点击 POST /api/agents/:id/stop → 按钮 disabled+已停止、卡片灰化、stop-signals.jsonl 落记录、/api/state.stopRequested=true；done/失败/离场子卡与 main 卡无可见停止按钮 | 子 Agent 停止功能 |
 
 ## 二、测试报告模板
 

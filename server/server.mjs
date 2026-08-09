@@ -10,8 +10,9 @@
 
 import { createServer } from "node:http";
 import { stat, open as openFile, readFile, rename, writeFile, rm } from "node:fs/promises";
+import { appendFileSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
-import { PORT, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS, ALLOWED_ORIGIN } from "../config.mjs";
+import { PORT, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS, ALLOWED_ORIGIN, STOP_SIGNALS_FILE, STOP_REQUEST_TTL_MS } from "../config.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -152,6 +153,83 @@ function cleanupInactiveAgents() {
   while (pendingDispatch.length && now - pendingDispatch[0].ts > NAME_STALE_MS) {
     pendingDispatch.shift();
   }
+  // 顺带清理已失效的停止请求信号（见下方 pruneStopSignals，保持文件小）
+  pruneStopSignals();
+}
+
+// ---------------------------------------------------------------------------
+// 停止请求信号（data/stop-signals.jsonl）：看板记录的"停止子 Agent"意图，
+// 由外部主会话消费该文件执行真实中断。本服务只追加/清理该文件，禁止写 events.jsonl
+// （避免与 hooks 采集器并发冲突）。记录格式：一行一个 JSON { ts, agent, status: "requested" }
+// ---------------------------------------------------------------------------
+const stopSignals = new Map(); // agentId -> { ts, agent, status }（同 id 保留 ts 最新一条）
+
+// 启动时把既有停止信号读入内存（服务重启后历史信号仍可被外部主会话消费）
+function loadStopSignals() {
+  let text;
+  try { text = readFileSync(STOP_SIGNALS_FILE, "utf8"); } catch { return; }
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const rec = JSON.parse(t);
+      if (rec && typeof rec.agent === "string" && rec.agent) {
+        const prev = stopSignals.get(rec.agent);
+        // 同 id 只保留 ts 最新的一条（ISO 字符串可直接按字典序比较）
+        if (!prev || String(rec.ts) >= String(prev.ts)) stopSignals.set(rec.agent, rec);
+      }
+    } catch { /* 残缺行忽略 */ }
+  }
+}
+
+// 追加一条停止信号：fs.appendFileSync + try/catch（写失败不抛给路由层可继续其他工作）
+function appendStopSignal(rec) {
+  try {
+    appendFileSync(STOP_SIGNALS_FILE, JSON.stringify(rec) + "\n", "utf8");
+    stopSignals.set(rec.agent, rec);
+    return true;
+  } catch (err) {
+    console.error("[server] 追加 stop-signal 失败:", err.message);
+    return false;
+  }
+}
+
+// 清理停止信号：删除"已不在 agents 中 / 已结束(done/failed) / 超过 TTL"的条目。
+// 特别注意：agents 为空（服务刚启动、尚未收到任何事件）时没有对照数据，不清理，
+// 避免重启后误删外部主会话尚未消费的待停止信号；TTL 过期条目无论何时都会清掉，
+// 保证文件长期有界。重写用临时文件 + rename 原子替换，避免外部消费者读到半截文件。
+function pruneStopSignals() {
+  let changed = false;
+  const now = Date.now();
+  for (const [id, rec] of stopSignals) {
+    const expired = typeof rec.ts === "string" && (now - Date.parse(rec.ts)) > STOP_REQUEST_TTL_MS;
+    const a = agents.get(id);
+    const gone = agents.size > 0 && (!a || isTerminalStatus(a.status));
+    if (expired || gone) {
+      stopSignals.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) flushStopSignals();
+}
+
+function flushStopSignals() {
+  try {
+    const body = stopSignals.size > 0
+      ? [...stopSignals.values()].map((r) => JSON.stringify(r)).join("\n") + "\n"
+      : "";
+    const tmp = STOP_SIGNALS_FILE + ".tmp";
+    writeFileSync(tmp, body, "utf8");
+    renameSync(tmp, STOP_SIGNALS_FILE);
+  } catch (err) {
+    console.error("[server] 重写 stop-signals.jsonl 失败:", err.message);
+  }
+}
+
+// 是否终态（done/failed）：终态 Agent 已不可停止，对应停止信号可清理
+function isTerminalStatus(status) {
+  const s = String(status || "").toLowerCase();
+  return s === "done" || s === "failed";
 }
 
 function applyEvent(e) {
@@ -340,15 +418,43 @@ async function maybeRotate() {
 // 响应工具
 // ---------------------------------------------------------------------------
 const CORS = { "Access-Control-Allow-Origin": ALLOWED_ORIGIN };
+// 停止接口额外头：同源无需 preflight；本地跨端口访问时补 Access-Control-Allow-Methods 亦可
+const STOP_EXTRA_HEADERS = { "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
 
-function sendJson(res, code, body) {
+function sendJson(res, code, body, extra) {
   const data = JSON.stringify(body);
   res.writeHead(code, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(data),
     ...CORS,
+    ...(extra || {}),
   });
   res.end(data);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agents/:id/stop：登记"停止子 Agent"请求（追加到 stop-signals.jsonl）。
+// 校验：agent 必须存在且处于存活态（非 done/failed / 已离场），否则 404 / 409。
+// 真实中断由外部（主会话）消费信号文件执行，本接口只做"请求 + 状态标记"闭环。
+// ---------------------------------------------------------------------------
+function handleAgentStop(agentId, res) {
+  if (agentId === "main") {
+    return sendJson(res, 409, { ok: false, error: "主 Agent 不允许停止" }, STOP_EXTRA_HEADERS);
+  }
+  const a = agents.get(agentId);
+  if (!a) {
+    // 已离场/不存在 → 404
+    return sendJson(res, 404, { ok: false, error: "agent 不存在或已离场" }, STOP_EXTRA_HEADERS);
+  }
+  if (isTerminalStatus(a.status)) {
+    // 已 done/failed → 409（与当前终态冲突）
+    return sendJson(res, 409, { ok: false, error: "agent 已结束，无法停止" }, STOP_EXTRA_HEADERS);
+  }
+  const ok = appendStopSignal({ ts: new Date().toISOString(), agent: agentId, status: "requested" });
+  if (!ok) {
+    return sendJson(res, 500, { ok: false, error: "写入停止信号失败" }, STOP_EXTRA_HEADERS);
+  }
+  return sendJson(res, 200, { ok: true, agent: agentId }, STOP_EXTRA_HEADERS);
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +465,16 @@ const server = createServer(async (req, res) => {
   const pathname = url.pathname;
 
   try {
+    // 仅放开 POST /api/agents/:id/stop（停止子 Agent 的信号入口），其余非 GET 一律 405
     if (req.method !== "GET") {
+      if (req.method === "POST") {
+        const m = pathname.match(/^\/api\/agents\/([^/]+)\/stop$/);
+        if (m) {
+          let agentId;
+          try { agentId = decodeURIComponent(m[1]); } catch { agentId = m[1]; }
+          return handleAgentStop(agentId, res);
+        }
+      }
       res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8", ...CORS });
       return void res.end("405 Method Not Allowed");
     }
@@ -421,6 +536,8 @@ function toAgentView(a) {
     endTime: a.endTime,
     lastSeen: a.lastSeen,
     history: a.history,
+    // 该 agent 是否有（未失效的）停止请求信号：stop-signals.jsonl 中最近一条判定
+    stopRequested: stopSignals.has(a.id),
   };
 }
 
@@ -467,7 +584,8 @@ async function serveStatic(pathname, res) {
 // 启动定时清理
 const cleanupTimer = setInterval(cleanupInactiveAgents, CLEANUP_INTERVAL);
 
-// 启动时序：先定位事件文件末尾（不重放历史），再监听端口
+// 启动时序：先载入既有停止信号、定位事件文件末尾（不重放历史），再监听端口
+loadStopSignals();
 await initReadOffset();
 server.listen(PORT, () => {
   console.log(`[vc-dashboard] server running at http://localhost:${PORT}`);

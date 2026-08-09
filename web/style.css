@@ -1242,6 +1242,70 @@ body {
   font-size: 11px;
 }
 
+/* ---------- 12c. 停止按钮与"已停止"状态 ---------- */
+/* 停止按钮：小号、红色描边/红色（复用 --failed 色），圆角，醒目易点。
+ * 放 meta-line 内（margin-left:auto 推到行尾）；disabled（已停止）整体灰化。 */
+.stop-zone {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.stop-agent-btn {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  color: var(--failed);
+  background: rgba(var(--failed-rgb), 0.10);
+  border: 1px solid rgba(var(--failed-rgb), 0.55);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.stop-agent-btn:hover:not(:disabled) {
+  background: rgba(var(--failed-rgb), 0.24);
+  border-color: var(--failed);
+}
+
+.stop-agent-btn:disabled {
+  color: var(--muted-2);
+  background: rgba(141, 151, 173, 0.08);
+  border-color: rgba(141, 151, 173, 0.35);
+  cursor: not-allowed;
+}
+
+/* 已停止卡片：整体降饱和/灰化（服务端 stopRequested 或本地已发送停止请求时由 JS 加挂）。
+ * 写在各状态配色（§8）之后：同特异性后写生效，覆盖 queued/tool/asking 等状态主色；
+ * --sc 置灰后 accent / spinner / 呼吸动画自动跟随灰调。 */
+.agent-card.status-stopped {
+  --sc: var(--muted);
+  --sc-rgb: 141, 151, 173;
+}
+
+/* 排队/询问等呼吸动画停止，避免"还在活动"的误读 */
+.agent-card.status-stopped .card-wrap {
+  animation: none;
+}
+
+/* 办公场景降饱和 + 变暗（差分可观测） */
+.agent-card.status-stopped .office-scene {
+  opacity: 0.55;
+  filter: saturate(0.3);
+}
+
+.agent-card.status-stopped .accent {
+  background: linear-gradient(90deg, var(--muted), rgba(141, 151, 173, 0.2));
+}
+
+/* 离场/移除/超时回收中的卡片隐藏停止按钮（跟随卡片整体消失） */
+.agent-card.is-leaving .stop-zone,
+.agent-card.removing .stop-zone,
+.agent-card.timeout-leaving .stop-zone {
+  display: none;
+}
+
 /* ---------- 13. 子 Agent 离场（拜拜 + 淡出） ---------- */
 /* 子 Agent 完成/失败时由 JS 加 .is-leaving：先挥手拜拜（约 4s），
  * 再整体淡出消失（3s，延迟 4s 开始），JS 在 ~7.1s 时移除 DOM。

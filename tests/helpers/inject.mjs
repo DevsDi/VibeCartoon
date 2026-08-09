@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 // 项目根目录（本文件位于 <root>/tests/helpers/）
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const EVENTS_FILE = path.join(ROOT, "data", "events.jsonl");
+// 停止请求信号文件（服务端 POST /api/agents/:id/stop 追加，外部主会话消费）：
+// 供用例 15 断言落盘记录并在测试后清理 e2e- 测试 agent 的信号行。
+export const STOP_SIGNALS_FILE = path.join(ROOT, "data", "stop-signals.jsonl");
 
 /** 构造一条事件行（与 hooks/collect.mjs buildLine 输出的字段一致）。
  * @param {object} opts { hook, agent, type, tool, status, detail, ts }
