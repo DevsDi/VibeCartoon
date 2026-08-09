@@ -41,13 +41,16 @@ const REDACT_KEY =
 // 值级敏感字段：字符串值命中常见密钥样式即替换为 [REDACTED]（大小写敏感）
 //   sk-*              -> Anthropic 密钥
 //   Bearer            -> 认证头令牌
-//   ghp_ / gho_ / github_pat_ -> GitHub Personal / OAuth / Fine-grained PAT
+//   ghp_ / gho_ / ghr_ / ghu_ / github_pat_ -> GitHub Personal / OAuth / Refresh / Server-to-server / Fine-grained PAT
 //   xoxb/a/p/r/s-     -> Slack token
 //   AKIA              -> AWS Access Key ID（AKIA + 16 位大写字母/数字）
 //   eyJ...            -> JWT（Base64url 头），独立于 Bearer 前缀的裸 JWT 也能命中
+//     注：eyJ 前缀也可能出现在非 JWT 的 Base64 字符串中（如含 JSON 的 Base64 编码），
+//     但采用"宁严勿漏"策略——误伤仅导致多脱敏一小段文本（false positive 可接受，不丢数据），
+//     而漏过 JWT 则会泄露认证凭证（false negative 不可接受）。
 //   aws_session_token -> AWS 会话令牌（值紧跟键名，如 "aws_session_token=+F...=="）
 const REDACT_VALUE =
-  /sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}|aws_session_token[A-Za-z0-9/+_=\-]{10,}/g;
+  /sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|ghr_[A-Za-z0-9_]{8,}|ghu_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}|aws_session_token[A-Za-z0-9/+_=\-]{10,}/g;
 
 // 读入 stdin 的总字节上限：8MB，超出直接丢弃本条事件（不崩，恒 exit 0）
 const MAX_STDIN_BYTES = 8 * 1024 * 1024;

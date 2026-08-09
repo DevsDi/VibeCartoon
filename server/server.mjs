@@ -152,6 +152,11 @@ function pushHistory(a, note) {
 function cleanupInactiveAgents() {
   try {
     const now = Date.now();
+    // 顺带清理已失效的停止请求信号（见下方 pruneStopSignals，保持文件小）
+    // 必须在 agent 回收循环之前调用：此时 agents Map 仍包含终态（done/failed）agent 的 id，
+    // pruneStopSignals 内的 agents.get(id) 能正确判定 "agent 已知但终态" 并清除其信号；
+    // 若放在回收之后，终态 id 已被 delete，get 返回 undefined，信号残留至 24h TTL。
+    pruneStopSignals();
     for (const [key, a] of [...agents]) {
       // 主 Agent（main）绑定用户会话上下文，其生命周期应与看板前端一致而非跟随单次任务结束。
       // 回收 main 会导致看板主卡消失、后续事件无法挂载到主入口，因此对 main 豁免超时回收。
@@ -172,8 +177,6 @@ function cleanupInactiveAgents() {
     while (pendingDispatch.length && now - pendingDispatch[0].ts > NAME_STALE_MS) {
       pendingDispatch.shift();
     }
-    // 顺带清理已失效的停止请求信号（见下方 pruneStopSignals，保持文件小）
-    pruneStopSignals();
   } catch (err) {
     // 定时清理任何一步异常都不允许向上抛出，记录后继续
     console.error("[server] 定时清理异常:", err?.message ?? err);

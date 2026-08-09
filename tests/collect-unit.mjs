@@ -3,7 +3,7 @@
 // 直接通过 child_process 以 --dry 模式调用采集器（不写 events.jsonl）：
 //   node hooks/collect.mjs --dry < stdin
 // 断言采集器自身的核心契约：
-//   1. 值级脱敏：sk-*/Bearer/AKIA/eyJ(JWT 头)/Slack xox* 等密钥样式 → [REDACTED]
+//   1. 值级脱敏：sk-*/Bearer/AKIA/eyJ(JWT 头)/Slack xox*/ghr_/ghu_ 等密钥样式 → [REDACTED]
 //   2. 字段名黑名单脱敏：private_key / access_key / aws_session_token 等 → [REDACTED]
 //   3. PEM 公私钥整串 → [REDACTED]
 //   4. 截断：超长字符串按 MAX_STR、序列化 detail 按 DETAIL_CAP 截断，均不切出孤立代理对
@@ -67,7 +67,7 @@ const suite = (name, fn) => suites.push({ name, fn });
 // ---------------------------------------------------------------------------
 // 1) 值级脱敏
 // ---------------------------------------------------------------------------
-suite("值级脱敏：sk- / Bearer / ghp_ / gho_ / xox* 密钥样式 → [REDACTED]", () => {
+suite("值级脱敏：sk- / Bearer / ghp_ / gho_ / ghr_ / ghu_ / xox* 密钥样式 → [REDACTED]", () => {
   const SEC_SK     = "sk-ant-e2e-9876543210";
   const SEC_BEARER = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0";
   const SEC_GHP    = "ghp_ABCDEFGHIJKLMNOPQRSTUVWX";
@@ -246,6 +246,81 @@ suite("非法 JSON：畸形输入恒 exit 0，且 stderr 记录解析失败", ()
     r.stderr.includes("JSON 解析失败"),
     `stderr 应记录解析失败（实际: ${r.stderr.slice(0, 120) || "(空)"}）`
   );
+});
+
+// ---------------------------------------------------------------------------
+// 8) AKIA 值级脱敏（AWS Access Key ID）
+// ---------------------------------------------------------------------------
+suite("值级脱敏：AKIA 开头的 AWS Access Key ID → [REDACTED]", () => {
+  const payload = {
+    hook: "notification",
+    sk_test_key: "AKIA0123456789ABCDEF",
+    note: "AKIA 密钥应被脱敏",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  assert.ok(!r.stdout.includes("AKIA0123456789ABCDEF"), "stdout 不应残留 AKIA 密钥");
+  assert.ok(r.stdout.includes("AKIA 密钥应被脱敏"), "非敏感文本应原样保留");
+});
+
+// ---------------------------------------------------------------------------
+// 9) JWT 值级脱敏
+// ---------------------------------------------------------------------------
+suite("值级脱敏：eyJ 开头的裸 JWT → [REDACTED]", () => {
+  const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+  const payload = {
+    hook: "notification",
+    token: JWT,
+    note: "JWT 应被脱敏",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  assert.ok(!r.stdout.includes("eyJhbGciOiJIUzI1NiJ9"), "stdout 不应残留 JWT 头");
+  assert.ok(r.stdout.includes("JWT 应被脱敏"), "非敏感文本应原样保留");
+});
+
+// ---------------------------------------------------------------------------
+// 10) GitHub Refresh Token（ghr_）值级脱敏
+// ---------------------------------------------------------------------------
+suite("值级脱敏：ghr_ 开头的 GitHub Refresh Token → [REDACTED]", () => {
+  const GHR = "ghr_1ABCDefghijklmnop2345";
+  const payload = {
+    hook: "notification",
+    refresh_token: GHR,
+    note: "ghr_ token 应被脱敏",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  assert.ok(!r.stdout.includes(GHR), `stdout 不应残留 ghr_ token: ${GHR}`);
+  assert.ok(r.stdout.includes("ghr_ token 应被脱敏"), "非敏感文本应原样保留");
+});
+
+// ---------------------------------------------------------------------------
+// 11) GitHub Server-to-Server Token（ghu_）值级脱敏
+// ---------------------------------------------------------------------------
+suite("值级脱敏：ghu_ 开头的 GitHub Server-to-Server Token → [REDACTED]", () => {
+  const GHU = "ghu_1ABCDefghijklmnop2345";
+  const payload = {
+    hook: "notification",
+    server_token: GHU,
+    note: "ghu_ token 应被脱敏",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  assert.ok(!r.stdout.includes(GHU), `stdout 不应残留 ghu_ token: ${GHU}`);
+  assert.ok(r.stdout.includes("ghu_ token 应被脱敏"), "非敏感文本应原样保留");
 });
 
 // ---------------------------------------------------------------------------
