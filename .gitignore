@@ -10,3 +10,6 @@ Thumbs.db
 
 # 测试截图（根目录）
 test-screenshot.png
+
+# 测试报告产物
+tests/reports/
