@@ -89,14 +89,26 @@ export function slugFromCwd(cwd) {
 
 /**
  * 解析会话转录文件路径。优先使用注册表捕获的 transcriptPath（权威，避免 slug 大小写推导差异）；
+ * 该路径作为文件读取目标前须校验位于 TRANSCRIPT_ROOT（~/.claude/projects）之下，越界则拒绝
+ * 并回退 cwd 推导（修复项 L1：防异常/恶意注册路径被当作任意文件读取）；
  * 否则由 cwd + sessionId 推导（claude agents --json 提供的活跃会话）。
  * @param {string} sessionId
  * @param {string|null} cwd
  * @param {string|null} registeredPath 注册表已捕获的 transcript_path
- * @returns {string|null} 解析不出（缺 cwd 或无 sessionId）时为 null
+ * @returns {string|null} 解析不出（缺 cwd 或无 sessionId，或注册路径越界）时为 null
  */
 export function resolveSessionPath(sessionId, cwd, registeredPath) {
-  if (registeredPath) return registeredPath;
+  if (registeredPath) {
+    // 合法性校验：path.resolve 统一分隔符并解析 .. 后，判断规范化路径是否落在 TRANSCRIPT_ROOT
+    // 之下（前缀比较必须带 path.sep，避免 TRANSCRIPT_ROOT 的兄弟目录如 projects_evil 误判命中）。
+    // Windows 文件系统大小写不敏感，比较前统一小写，避免合法路径因大小写差异被误拒（误拒只是
+    // 回退 cwd 推导，无数据风险，但应尽量避免）。
+    const root = path.resolve(TRANSCRIPT_ROOT);
+    const resolved = path.resolve(registeredPath);
+    const lower = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+    if (lower(resolved).startsWith(lower(root) + path.sep)) return registeredPath;
+    return null;
+  }
   if (!sessionId || !cwd) return null;
   return path.join(TRANSCRIPT_ROOT, slugFromCwd(cwd), sessionId + ".jsonl");
 }
@@ -154,11 +166,15 @@ function normalizeStatus(raw) {
   return "running";
 }
 
-// 不完整桥接兜底清理阈值（reconcile 轮次）：assistant 行已读（uuidCall 有记录）、但 user 桥接行
-// （sourceToolAssistantUUID + toolUseResult.agentId）超过该轮 reconcile 仍未出现时，判定该桥接
-// 不会再完成（转录文件在 assistant 行后被截断/轮转，或异步 agent 的 user 行始终未写入），
-// 从 uuidCall 清理，避免「永远等待配对」的 uuid 条目无界驻留。宽限留量：正常异步 agent 的
-// async_launched tool_result 在派发后即写入转录，1~2 轮 reconcile 内即可配对，N 轮足以覆盖写入时延。
+// 不完整桥接兜底清理阈值（reconcile 轮次）：某 uuid 桥接条目在 INCOMPLETE_BRIDGE_ROUNDS 轮
+// reconcile 内既未出现终态（done/failed）、也未完成配对时，判定该桥接不会再收敛——转录文件在
+// assistant 行后被截断/轮转、异步 agent 的 user 行始终未写入、或完成证据丢失——从映射中清理，
+// 避免「永远等待」的 uuid 条目无界驻留。覆盖两类：
+//   ① 未配对：assistant 行已读（uuidCall 有记录）、user 桥接行始终未出现；
+//   ② 有配对但无终态：桥接已形成（uuidAgent 配对），但 agentId/callId 级终态信号均缺失
+//      （如同步 Agent 的 tool_result 完成信号丢失，或异步 Agent 的任务通知未写入）。
+// 宽限留量：正常 agent（含异步）在派发/完成后 1~2 轮 reconcile 内即出现配对或终态信号，
+// N 轮足以覆盖写入时延，不误伤在途桥接。
 const INCOMPLETE_BRIDGE_ROUNDS = 3;
 
 /**
@@ -168,9 +184,10 @@ const INCOMPLETE_BRIDGE_ROUNDS = 3;
  *   completed : Map<callId|agentId, "done"|"failed"|"running">（同 key 取最新，后写覆盖；
  *               task-id 通知以 agentId 为 key，tool_result/历史 tool-use-id 以 callId 为 key）
  *   keyMap    : Map<callId, agentId>（需调用 buildKeyMap() 构建）
- *   pruneBridges() : 清理已提交桥接且 agent 已达终态的 uuidCall/uuidAgent 条目；未配对的
- *                    不完整桥接超过 INCOMPLETE_BRIDGE_ROUNDS 轮 reconcile 亦兜底清理
- *                    （有界化，见实现处注释）
+ *   pruneBridges() : 清理已提交桥接且 agent 已达终态（agentId 级任务通知或 callId 级 tool_result，
+ *                    同步 Agent 只产生后者）的 uuidCall/uuidAgent 条目；未达终态的条目（未配对、
+ *                    或有配对但终态信号缺失）超过 INCOMPLETE_BRIDGE_ROUNDS 轮 reconcile 亦兜底
+ *                    清理（有界化，见实现处注释）
  */
 export function createTranscriptParser() {
   const started = new Map();   // callId -> { description, uuid, async, ts }
@@ -277,32 +294,41 @@ export function createTranscriptParser() {
   }
 
   // 清理已消费的 uuid 桥接条目（修复项1：uuidCall/uuidAgent 跨会话无界增长）。
-  // 仅清理「桥接已提交到 keyMap 且该 agent 已达终态（done/failed）」的 uuid——
-  // 此时该 uuid 映射已不再需要：
-  //   ① 桥接结果已持久化在 keyMap（callId→agentId），后续查询/对账不依赖 uuid 映射；
-  //   ② 终态后不会再收到新的完成通知；即便有（如批量 stopped 覆盖单个 completed），
-  //      agentId 级 completed 仍是权威，僵尸修复直接按 agentId 键查对账，
-  //      callId 级传播缺失可自愈（最多一次「回填→立即修复」抖动），不破坏最终收敛。
-  // 保留「未达终态」的 uuid（如异步运行中的 agent）：晚到的 task 通知仍需经
-  // reconcileCompleted 由 uuid 映射向 callId 级传播状态，提前清理会误判 running
-  // 而触发无谓的回填。故两 Map 的量级始终受「在途（未终态）桥接数」限制，
-  // 随各会话 agent 收敛即回落，长期运行下有界。
-  //
-  // 修复项X（不完整桥接兜底）：上述逻辑只对「有 uuidAgent 配对」的条目有界，但配对永远
-  // 不发生的情况——assistant 行已读（uuidCall 有记录）、user 桥接行始终未出现（转录文件在
-  // assistant 行后被截断/轮转，或异步 agent 的 user 行在后续 reconcile 中始终未写入）——
-  // 会让 uuidCall 条目无限等待配对而驻留。故对未配对的 uuidCall（及反向孤儿 uuidAgent），
-  // 以其「首见 reconcile 轮次」为基准，超过 INCOMPLETE_BRIDGE_ROUNDS 轮仍未配对即清理：
-  // 此时该 uuid 既未参与 keyMap 桥接（buildKeyMap 需两 Map 同时命中）、也无法被
-  // reconcileCompleted 传播（传播同样需 uuidCall 与 uuidAgent 同时存在），保留无意义；
-  // 正常异步 agent 的 user 行在派发后即写入转录、1~2 轮内配对，N 轮宽限不误伤。
+  // 清理时机（任一满足即删）：
+  //   A. 终态：桥接已提交到 keyMap 且 agent 已达终态（done/failed）——此时该 uuid 映射
+  //      已不再需要：
+  //       ① 桥接结果已持久化在 keyMap（callId→agentId），后续查询/对账不依赖 uuid 映射；
+  //       ② 终态后不会再收到新的完成通知；即便有（如批量 stopped 覆盖单个 completed），
+  //          agentId 级 completed 仍是权威，僵尸修复直接按 agentId 键查对账，
+  //          callId 级传播缺失可自愈（最多一次「回填→立即修复」抖动），不破坏最终收敛。
+  //      终态检查须同时覆盖 agentId 级（<task-id> 任务通知）与 callId 级（tool_result 完成
+  //      信号）——同步 Agent 只经 tool_result 产生 callId 级 done、从不收到 agentId 级
+  //      任务通知，仅查 agentId 会让其桥接条目永不清理（修复项 L2）。
+  //   B. 超时：未达终态的条目（未配对、或有配对但终态信号缺失），以其「首见 reconcile 轮次」
+  //      为基准，超过 INCOMPLETE_BRIDGE_ROUNDS 轮仍未收敛即兜底清理（修复项 X / 修复项 M1）。
+  //      宽限留量：正常 agent（含异步）在派发/完成后 1~2 轮 reconcile 内即出现配对或终态信号，
+  //      N 轮宽限不误伤在途桥接；超宽限仍未收敛的条目保留无意义——keyMap 桥接已持久化，
+  //      晚到的任务通知仍可由 agentId 级 completed 直查看板（僵尸修复），不破坏最终收敛。
+  // 故两 Map 的量级始终受「宽限窗口内的在途桥接 + 近期终态桥接」限制，长期运行下有界。
   function pruneBridges() {
     round++; // 本轮 reconcile（调用方每次对账调用一次本函数）
     for (const [uuid, callId] of uuidCall) {
       const agentId = uuidAgent.get(uuid);
       if (agentId) {
-        const s = completed.get(agentId);
-        if (s === "done" || s === "failed") {
+        // 终态检查（修复项 L2）：agentId 级（<task-id> 任务通知）与 callId 级（tool_result，
+        // 同步 Agent）任一命中即视为已消费。同步 Agent 只产生 callId 级 done、从不收到
+        // agentId 级任务通知，仅查 agentId 会永不命中。
+        const sAgent = completed.get(agentId);
+        const sCall = completed.get(callId);
+        if (sAgent === "done" || sAgent === "failed" ||
+            sCall === "done" || sCall === "failed") {
+          uuidCall.delete(uuid);
+          uuidAgent.delete(uuid);
+          uuidSeen.delete(uuid);
+        } else if (round - (uuidSeen.get(uuid) ?? round) >= INCOMPLETE_BRIDGE_ROUNDS) {
+          // 有配对但无任何终态（修复项 M1）：同步 Agent 的 tool_result 完成信号缺失、或
+          // 异步 Agent 的任务通知始终未出现（转录截断/轮转）时，该桥接永不收敛 →
+          // 与未配对条目同等超时兜底清理，防有配对条目无界驻留。
           uuidCall.delete(uuid);
           uuidAgent.delete(uuid);
           uuidSeen.delete(uuid);
@@ -316,7 +342,7 @@ export function createTranscriptParser() {
     // 反向孤儿：uuidAgent 有、uuidCall 无（user 桥接行读到但 assistant 行缺失，如跨会话引用）
     // → 同样按轮次兜底清理，防 uuidAgent 侧无界驻留
     for (const [uuid, agentId] of uuidAgent) {
-      if (uuidCall.has(uuid)) continue; // 有配对 → 交由上方逻辑按终态处理
+      if (uuidCall.has(uuid)) continue; // 有配对 → 交由上方逻辑按终态/超时处理
       if (round - (uuidSeen.get(uuid) ?? round) >= INCOMPLETE_BRIDGE_ROUNDS) {
         uuidAgent.delete(uuid);
         uuidSeen.delete(uuid);
