@@ -9,6 +9,9 @@
 </head>
 <body>
 
+  <!-- 无障碍播报区（P1）：屏幕阅读器可感知的状态变化，视觉隐藏（见 style.css .sr-only） -->
+  <div id="status-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
   <!-- ====================== 断连横幅 ====================== -->
   <!-- 轮询失败时由 JS 显示，恢复成功后隐藏 -->
   <div id="conn-banner" class="conn-banner hidden" role="alert">
@@ -23,6 +26,22 @@
         <h1 class="brand-title">Vibe <span class="brand-accent">Agent</span> Dashboard</h1>
         <p class="brand-subtitle">Claude Code 各 Agent 工作进度</p>
         <span id="updated-at" class="updated-at">—</span>
+      </div>
+
+      <!-- 顶部操作区（P1/P2）：特效密度 / 音效开关 / 历史回放 -->
+      <div class="header-actions">
+        <label class="ctl-label" for="motion-select">特效</label>
+        <select id="motion-select" class="ctl-select">
+          <option value="auto">自动</option>
+          <option value="reduced">减少</option>
+          <option value="off">关闭</option>
+        </select>
+        <label class="ctl-label ctl-check" for="sound-toggle">
+          <input type="checkbox" id="sound-toggle" />
+          <span>音效</span>
+        </label>
+        <button type="button" id="history-btn" class="ctl-btn">加载历史</button>
+        <button type="button" id="back-live-btn" class="ctl-btn hidden">返回实时</button>
       </div>
     </div>
   </header>

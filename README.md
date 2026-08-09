@@ -51,14 +51,57 @@ http://localhost:8617
 
 每条事件保留字段：`ts`、`hook`、`agent`、`type`、`tool`、`status`、`detail`、`tok`。其中 `detail` 会做脱敏（字段名命中 `api_key`/`token`/`secret`/`password` 等黑名单整体替换为 `[REDACTED]`）与截断（普通字符串 250 字符、序列化后总长 2000 字符）。
 
-可以直接用管道手工验证采集器：
+### Claude Code hooks 接线（settings.json 示例）
+
+在 Claude Code 侧把采集事件接到采集器。`hooks/collect.mjs` 支持的全部 5 个 hook 事件（`SubagentStart` / `SubagentStop` / `PreToolUse` / `PostToolUse` / `Notification`）统一走 `command` 类型命令——事件 JSON 由 Claude Code 通过 stdin 管道交给采集器。把下面这段 JSON 放进 `hooks` 键即可（`.claude/settings.json` 为项目级，`~/.claude/settings.json` 为用户级）：
+
+```json
+{
+  "hooks": {
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "node \"D:\\workspace\\Vibe Cartoon\\vc-dashboard\\hooks\\collect.mjs\"" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "node \"D:\\workspace\\Vibe Cartoon\\vc-dashboard\\hooks\\collect.mjs\"" }] }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "node \"D:\\workspace\\Vibe Cartoon\\vc-dashboard\\hooks\\collect.mjs\"" }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "node \"D:\\workspace\\Vibe Cartoon\\vc-dashboard\\hooks\\collect.mjs\"" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "node \"D:\\workspace\\Vibe Cartoon\\vc-dashboard\\hooks\\collect.mjs\"" }] }
+    ]
+  }
+}
+```
+
+> **command 路径写法**：
+> - **推荐写绝对路径**（如示例）：把 `D:\workspace\Vibe Cartoon\vc-dashboard` 换成你仓库的实际路径。路径含空格（如 `Vibe Cartoon`）时 `"` 双引号必须保留（它是 `node` 的一个参数）；JSON 字符串里的 `\` 须写成 `\\`。
+> - **或借用 `%cd%`（仅 Windows）**：`node "%cd%\hooks\collect.mjs"`。`%cd%` 由 shell 展开为当前工作目录——仅当 `.claude\settings.json` 位于仓库根目录、且你总在该目录启动 Claude Code 时有效；换目录启动时会写到别处。新手建议直接用绝对路径。
+> - 五个事件可共用同一条 `command`：采集器按 `hook_event_name` 归一化（如 `SubagentStart` → `subagent_start`），无需为每个事件分别写命令。
+
+### 接好后的冒烟验证
+
+配置保存、服务重启后，先别急着跑真实任务——在仓库根目录手工注入一条事件，验证「采集 → 落盘 → 展示」链路已通（首次装机最常见的坑就是配置没生效或路径不对，导致看板永远空白）：
+
+```bash
+echo '{"hook":"SubagentStart","subagent_id":"demo","agent_type":"general"}' | node hooks/collect.mjs   # 追加一条事件
+```
+
+刷新 `http://localhost:8617`：约 0.6 秒后（前端 600ms 轮询）右栏应出现一张名为 `demo` 的子任务卡片（状态「⏳ 排队中」，并伴随火柴人跑向子 Agent 的派发动画）。这张 `demo` 卡片由 `STALE_MS`（10 分钟）超时自动回收，验证完无需手动清理。
+
+### 手工验证采集器（不依赖配置）
+
+不想动 Claude Code 配置时，也可用管道手工验证采集器：
 
 ```bash
 echo '{"hook":"SubagentStart","subagent_id":"demo-1","agent_type":"general"}' | node hooks/collect.mjs            # 写入事件文件
 echo '{"hook":"SubagentStart","subagent_id":"demo-1","agent_type":"general"}' | node hooks/collect.mjs --dry   # 只打印，不写文件
 ```
 
-> 说明：本仓库只包含「采集器」与「看板」，不包含 Claude Code 侧的 hook 接线配置（如 `settings.json` 中的 hooks 规则）。接入方式为：在 Claude Code 侧配置 hooks，把上述事件通过管道交给 `node hooks/collect.mjs`，使事件落盘到 `data/events.jsonl`，看板即可实时展示。
+> 说明：本仓库只包含「采集器」与「看板」，真正的接线需在 Claude Code 侧配置 `hooks` 规则（见上方 settings.json 示例）——把上述事件通过管道交给 `node hooks/collect.mjs`，使事件落盘到 `data/events.jsonl`，看板即可实时展示。
 
 ## 配置说明
 
@@ -67,6 +110,7 @@ echo '{"hook":"SubagentStart","subagent_id":"demo-1","agent_type":"general"}' | 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `PORT` | `8617` | 看板服务监听端口 |
+| `HOST` | `127.0.0.1` | 服务监听地址（默认仅本机可访问）；需局域网/其它主机访问时用环境变量 `HOST` 覆盖（如 `HOST=0.0.0.0`） |
 | `STALE_MS` | `10 * 60 * 1000`（10 分钟） | Agent 超过该时长无任何事件 → 被回收（主 Agent `main` 豁免） |
 | `MAX_BYTES` | `10 * 1024 * 1024`（10MB） | `events.jsonl` 超过该体积 → 轮转为 `.1` 并新建 |
 | `ALLOWED_ORIGIN` | `http://localhost:<PORT>` | CORS 允许来源，可通过同名环境变量覆盖 |
@@ -105,17 +149,21 @@ vc-dashboard/
 
 ## API 说明
 
-服务端提供只读 GET 接口，另开放 `POST /api/agents/:id/stop` 用于登记「停止子 Agent」请求；除该 POST 外的其他非 GET 方法仍返回 `405`。
+服务端提供只读 GET 接口（含历史回放 `GET /api/history` 与 SSE 实时流 `GET /api/stream`），另开放 `POST /api/agents/:id/stop` 用于登记「停止子 Agent」请求；除该 POST 外的其他非 GET 方法仍返回 `405`。
 
 | 接口 | 用途 | 返回概要 |
 |---|---|---|
 | `GET /api/health` | 健康检查 | `{ ok: true, fileBytes }`（事件文件当前字节数） |
 | `GET /api/state` | 看板聚合数据 | `{ updatedAt, agents: [...], summary: {...} }` |
+| `GET /api/history` | 历史事件回放 | 事件文件中的历史事件序列，供回放/回溯看板时间线 |
+| `GET /api/stream` | SSE 实时事件流 | `text/event-stream`，持续推送新采集到的事件 |
 | `GET /api/events` | 原始事件调试 | `{ events: [...], nextOffset }` |
 | `POST /api/agents/:id/stop` | 登记停止子 Agent 请求 | `200 { ok: true, agent }` / `404`（不存在或已离场）/ `409`（已 `done`/`failed` 或主 Agent） |
 
 - `/api/state`：采用「增量读」事件文件 + 状态机聚合。`agents` 为按开始时间升序的全部 Agent，每个 Agent 含 `id / type / name / status / currentTool / toolCount / startTime / endTime / lastSeen / history / stopRequested`（`history` 最多保留最近 6 条状态简记；`stopRequested` 为布尔，表示该 Agent 是否有未失效的停止请求信号）；`summary` 统计 `total / active / done / queued / thinking / tool / failed / asking` 各档数量。文件被截断或轮转时偏移自动归零重读。
 - `/api/events`：调试用，支持 `?since=<offset>` 从指定字节偏移读取原始事件，不推进 `/api/state` 的聚合偏移。
+- `/api/history`：历史回放接口，返回事件文件中的历史事件序列，便于回溯已结束的会话或重建时间线。
+- `/api/stream`：SSE 实时流（`text/event-stream`），服务端持续向订阅端推送新采集的事件，前端可据此即时刷新，弥补 600ms 轮询的延迟。
 - `POST /api/agents/:id/stop`：校验 Agent 存在且处于存活态（非 `done`/`failed`/已离场），通过后原子追加一行 JSON 到独立文件 `data/stop-signals.jsonl`（**禁止写 `events.jsonl`**，避免与采集器并发冲突）。信号文件每行格式：`{"ts":"<ISO 时间>","agent":"<子 Agent id>","status":"requested"}`。真实中断由外部（主会话）消费该文件执行；服务端会周期清理「已不在 agents 中 / 已 `done`/`failed` / 超过 `STOP_REQUEST_TTL_MS`」的条目以保持文件小。
 
 ## 测试

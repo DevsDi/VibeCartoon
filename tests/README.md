@@ -17,8 +17,11 @@ npm test -- --headful           # 有头模式（可观察动画过程）
 npm test -- --only=01-失败       # 只跑用例名前缀匹配的用例
 npm test -- --keep-events       # 测试后不清理 events.jsonl 中的注入行
 npm test -- --report=out.json   # 指定报告输出路径（默认 tests/reports/latest.json）
+node tests/collect-unit.mjs     # collect 采集器单元测试（纯 Node，零依赖，无需服务/浏览器）
 node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无需）
 ```
+
+`.github/workflows/ci.yml`：Node 20/22 矩阵 → `npm run test:unit` → 后台起服务并轮询 `/api/health` → `VC_TEST_BROWSER=chromium node tests/run.mjs` → 上传 `tests/reports/**`（运行前清空事件文件保证幂等）。
 
 ### 工作原理
 - 测试通过向 `data/events.jsonl` **追加构造事件**（与 `hooks/collect.mjs` 输出同格式）驱动真实看板：
@@ -51,7 +54,10 @@ node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无�
 | `cases/12-concurrent-queue.mjs` | 批量并发子 Agent 的 toSub 火柴人 FIFO 排队：同一时刻至多 1 个 .stickman-runner、依次出现 | 动画完善-方向A |
 | `cases/13-tool-screen-anim.mjs` | tool 状态且挂 tool-type-* 类时对应 .screen-* 子层 animationName≠none；转 thinking 后层隐藏 | 动画完善-方向C |
 | `cases/14-timeout-leave.mjs` | 超时回收挂 .timeout-leaving（打盹😴→熄灯→淡出）；style.css 选择器静态校验 + 页面内差分断言 | 动画完善-方向B |
-| `cases/15-stop-agent.mjs` | 子 Agent 停止：存活子卡渲染「⏹ 停止」→点击 POST /api/agents/:id/stop → 按钮 disabled+已停止、卡片灰化、stop-signals.jsonl 落记录、/api/state.stopRequested=true；done/失败/离场子卡与 main 卡无可见停止按钮 | 子 Agent 停止功能 |
+| `cases/15-stop-agent.mjs` | 子 Agent 停止：存活子卡渲染「⏹ 停止」→点击 POST /api/agents/:id/stop → 按钮 disabled+「已停止」、卡片灰化、stop-signals.jsonl 落记录、/api/state.stopRequested=true；done/失败/离场子卡与 main 卡无可见停止按钮 | 子 Agent 停止功能 |
+| `cases/16-asking.mjs` | asking 过渡：notification(agent_needs_input) 挂最近活跃子 Agent → status-asking + .ask-ring 气环 + 💬/「等待输入」+ raiseHand 举手动画 | notification→asking |
+| `cases/17-motion-toggle.mjs` | 特效密度开关：localStorage vc-motion=off/reduced → body[data-motion=off/reduced]、控件同步、off 下背景符号隐藏且功能正常 | 特效密度 P1 |
+| `collect-unit.mjs` | collect 单测（纯 Node 零依赖）：值级脱敏 sk-/Bearer/ghp_→[REDACTED]、>8MB 输入丢弃恒 exit 0、正常事件透传。运行 `npm run test:unit` | 采集器质量保障 |
 
 ## 二、测试报告模板
 

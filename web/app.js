@@ -93,6 +93,21 @@
   /* 卡片入场动画时长（毫秒）：.enter 过渡结束后移除类名 */
   const ENTER_ANIM_MS = 1700;
 
+  /* 特效密度（P1）：auto=跟随系统 reduced-motion；reduced=显式降级；off=关闭全部。
+   * 持久化到 localStorage（vc-motion）；音效开关 vc-sound 同属动效设置一并持久化。 */
+  const MOTION_KEY = 'vc-motion';
+  const SOUND_KEY = 'vc-sound';
+  const MOTION_LEVELS = ['auto', 'reduced', 'off'];
+
+  /* SSE 加速刷新（P3）：连接失败连续 3 次后放弃 SSE，回归纯 600ms 轮询兜底 */
+  const SSE_MAX_FAILS = 3;
+
+  /* 背景符号联动（P2）：summary.active 驱动的漂移时长与透明度范围（上下限） */
+  const BG_DRIFT_MAX_S = 20;      // active=0 → 最长漂移（最慢）
+  const BG_DRIFT_MIN_S = 5;       // active 很高 → 最短漂移（最快）
+  const BG_OPACITY_MIN = 0.06;    // active=0 → 最暗
+  const BG_OPACITY_MAX = 0.30;    // active 很高 → 最亮
+
   /* 活动卡片网格内的排序优先级：越靠前越优先 */
   const ACTIVE_PRIORITY = { asking: 0, tool: 1, thinking: 2, queued: 3, running: 4, unknown: 5 };
 
@@ -106,6 +121,17 @@
   let lastMainAgentCallCount = 0; // main 的 history 中派发/补充任务工具调用（Agent/SendMessage）累计次数基准
   let hasSubAgents = false;       // 本轮渲染是否存在存活子 Agent（方案 E：main 正等子 Agent 交回结果时不判待机）
   let pollTimer = null;           // 轮询定时器句柄，页面不可见时暂停用
+
+  /* P1：特效/音效偏好（从 localStorage 读取，默认自动 / 音效开） */
+  let motionLevel = 'auto';
+  let soundOn = true;
+  let audioCtx = null;            // WebAudio 上下文：首次用户交互后初始化（autoplay 政策）
+  /* P2：历史回放状态（与实时模式互斥） */
+  let replayMode = false;         // 回放中：暂停实时轮询
+  let replayLoading = false;      // "加载历史"请求进行中（防重复点击）
+  /* P3：SSE 加速刷新状态 */
+  let sse = null;
+  let sseFails = 0;
 
   /* 在途派发小人集合：正在途中（toSub）跑向子 Agent 的火柴人的 agent id。
    * animateAgentChanges 据此抑制 done/failed 时重复创建 backToMain 汇报小人：
@@ -135,6 +161,27 @@
     els.emptyState = document.getElementById('empty-state');
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
+
+    // P1/P2：特效密度 / 音效开关 / 历史回放控件 / aria-live 播报区
+    els.motionSelect = document.getElementById('motion-select');
+    els.soundToggle = document.getElementById('sound-toggle');
+    els.historyBtn = document.getElementById('history-btn');
+    els.backLiveBtn = document.getElementById('back-live-btn');
+    els.liveRegion = document.getElementById('status-live');
+    loadPrefs();
+    applyMotion();
+    els.motionSelect.value = motionLevel;
+    els.motionSelect.addEventListener('change', function () { setMotion(els.motionSelect.value); });
+    els.soundToggle.checked = soundOn;
+    els.soundToggle.addEventListener('change', function () { setSound(els.soundToggle.checked); });
+    els.historyBtn.addEventListener('click', enterReplay);
+    els.backLiveBtn.addEventListener('click', exitReplay);
+
+    // 音效解锁（autoplay 政策）：首次用户交互（点击/触摸/按键）后初始化 AudioContext，
+    // 解铃前 playChime 不播任何声音（默认不打扰）
+    document.addEventListener('pointerdown', unlockAudio, { passive: true });
+    document.addEventListener('touchstart', unlockAudio, { passive: true });
+    document.addEventListener('keydown', unlockAudio);
 
     // 停止按钮：事件委托到子 Agent 网格（按钮 DOM 随轮询重建，委托避免重复绑定）
     els.activeGrid.addEventListener('click', onStopClick);
@@ -166,26 +213,27 @@
     // 初始空状态
     setEmptyVisible(true);
 
-    // 立即拉取一次，然后按固定间隔轮询
-    poll();
-    pollTimer = window.setInterval(poll, POLL_INTERVAL);
+    // 立即拉取一次，然后按固定间隔轮询；SSE 到达新事件时增量触发 poll 加速刷新
+    startPolling();
+    setupSSE();
 
     // 页面可见性：后台标签页暂停轮询，节省 CPU；火柴人动画仅在动画期间运行，不影响常驻性能，不暂停
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) {
-        if (pollTimer) { window.clearInterval(pollTimer); pollTimer = null; }
-      } else {
-        if (!pollTimer) { poll(); pollTimer = window.setInterval(poll, POLL_INTERVAL); }
+        stopPolling();
+      } else if (!replayMode) {
+        startPolling();
       }
     });
   }
 
   /* ---------------- 轮询 ---------------- */
   async function poll() {
-    if (polling) return;
+    if (polling || replayMode) return; // P2：回放中暂停轮询（与实时模式互斥）
     polling = true;
     try {
       const data = await fetchState();
+      if (replayMode) return; // 回放已接管：丢弃在途的实时结果，避免覆盖回放渲染
       setOnline(true);
       render(data);
     } catch (err) {
@@ -210,6 +258,340 @@
 
   function setOnline(ok) {
     els.connBanner.classList.toggle('hidden', ok);
+  }
+
+  /* ---------------- 特效/音效/无障碍（P1） ---------------- */
+  /* 读取 localStorage 偏好：特效密度（vc-motion）+ 音效开关（vc-sound） */
+  function loadPrefs() {
+    let m = 'auto';
+    try { m = localStorage.getItem(MOTION_KEY) || 'auto'; } catch (err) { /* 隐私模式等异常忽略 */ }
+    motionLevel = MOTION_LEVELS.indexOf(m) !== -1 ? m : 'auto';
+    let s = '1';
+    try { s = localStorage.getItem(SOUND_KEY) || '1'; } catch (err) { /* 同上 */ }
+    soundOn = s !== '0';
+  }
+
+  /* 设置特效密度并持久化，切换立即生效（无需刷新） */
+  function setMotion(level) {
+    motionLevel = MOTION_LEVELS.indexOf(level) !== -1 ? level : 'auto';
+    try { localStorage.setItem(MOTION_KEY, motionLevel); } catch (err) { /* 隐私模式忽略 */ }
+    applyMotion();
+  }
+
+  /* 应用到 body[data-motion]：CSS 依据该属性显式降级/关闭动画
+   * （auto 交给 style.css 现有的 @media (prefers-reduced-motion: reduce) 处理） */
+  function applyMotion() {
+    document.body.dataset.motion = motionLevel;
+  }
+
+  /* 音效开关：与特效同属动效设置，一并持久化到 localStorage */
+  function setSound(on) {
+    soundOn = !!on;
+    try { localStorage.setItem(SOUND_KEY, soundOn ? '1' : '0'); } catch (err) { /* 忽略 */ }
+  }
+
+  /* 是否处于动效降级：显式 reduced / off，或 auto 且系统开启 reduced-motion。
+   * 火柴人、庆祝、音效等重特效统一走这个判定。 */
+  function isMotionReduced() {
+    if (motionLevel === 'reduced' || motionLevel === 'off') return true;
+    if (motionLevel === 'auto' && window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
+    return false;
+  }
+
+  /* WebAudio 上下文初始化（autoplay 政策）：仅在首次用户交互后创建/resume。
+   * 创建失败（无 WebAudio 支持）静默降级，不影响主流程。 */
+  function unlockAudio() {
+    if (!audioCtx) {
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = AC ? new AC() : null;
+      } catch (err) { audioCtx = null; }
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(function () { /* 忽略拒绝 */ });
+    }
+  }
+
+  /* 完成/失败提示音（P1，零依赖 WebAudio）：
+   * done → 两个短促上升正弦音；failed → 低沉下降音。
+   * 尊重音效开关与动效降级（reduced/off 不播）；未解锁（无用户交互）时不播。 */
+  function playChime(kind) {
+    if (!soundOn) return;
+    if (isMotionReduced()) return;   // 降级/关闭特效时同步静音
+    if (!audioCtx) return;           // 尚无用户交互，autoplay 政策未解锁
+    try {
+      const ctx = audioCtx;
+      const t0 = ctx.currentTime + 0.02;
+      const notes = kind === 'done'
+        ? [{ f: 523.25, at: 0.0, dur: 0.13 }, { f: 783.99, at: 0.13, dur: 0.16 }]  // C5 → G5 上行
+        : [{ f: 311.13, at: 0.0, dur: 0.16 }, { f: 207.65, at: 0.16, dur: 0.26 }]; // E♭4 → G♭3 下行
+      notes.forEach(function (n) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = n.f;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        const a = t0 + n.at;
+        gain.gain.setValueAtTime(0.0001, a);
+        gain.gain.exponentialRampToValueAtTime(0.14, a + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, a + n.dur);
+        osc.start(a);
+        osc.stop(a + n.dur + 0.04);
+      });
+    } catch (err) { /* 音效失败静默，不影响主流程 */ }
+  }
+
+  /* aria-live 无障碍播报（P1）：写入可读文本，屏幕阅读器可感知。
+   * 先清空再写入，保证重复文本也能触发播报。 */
+  function announce(text) {
+    if (!els.liveRegion) return;
+    els.liveRegion.textContent = '';
+    window.setTimeout(function () {
+      els.liveRegion.textContent = text;
+    }, 30);
+  }
+
+  /* Agent 展示名：main → "主 Agent"；子 Agent 优先任务描述 name，回退 type */
+  function displayName(a) {
+    if (!a) return 'Agent';
+    if (a.id === 'main') return '主 Agent';
+    const name = typeof a.name === 'string' && a.name ? a.name
+      : (typeof a.type === 'string' && a.type ? a.type : 'Agent');
+    return truncate(name, 30);
+  }
+
+  /* ---------------- SSE 加速刷新（P3） ----------------
+   * 优先用 EventSource 订阅 /api/stream：收到 type=event 立即触发一次 poll()
+   * （增量刷新，比 600ms 轮询感知更快）；type=ping 忽略（保活心跳）；
+   * 连接失败累计 3 次后关闭 SSE，回归纯轮询兜底（现有 600ms 轮询保留）。
+   * 同源访问（http://localhost:8617）不触发 CORS 问题。 */
+  function setupSSE() {
+    if (sse || typeof EventSource === 'undefined') return;
+    try {
+      sse = new EventSource('/api/stream');
+      sse.onmessage = function (ev) {
+        try {
+          const msg = JSON.parse(ev.data || '');
+          if (msg && msg.type === 'event') {
+            if (!replayMode) poll(); // 新事件到达：立即增量刷新（回放中忽略）
+          }
+        } catch (err) { /* 非 JSON 数据忽略 */ }
+      };
+      sse.onerror = function () {
+        sseFails++;
+        if (sseFails >= SSE_MAX_FAILS) {
+          // 连续 3 次失败：放弃 SSE，回归纯轮询
+          if (sse) { try { sse.close(); } catch (err) { /* 忽略 */ } sse = null; }
+        }
+        // 未达上限：EventSource 自带自动重连（服务端 retry: 2000），无需手动重启
+      };
+    } catch (err) {
+      sse = null; // 创建失败 → 走纯轮询兜底
+    }
+  }
+
+  /* ---------------- 背景符号联动（P2） ----------------
+   * 每次 render 用 summary.active 数量设置 CSS 变量：
+   *   --bg-drift  漂移时长（active 越多 → 越短 → 漂得更快，上下限 5-20s）
+   *   --bg-opacity 透明度（active 越多 → 越亮，上下限 0.06-0.30）
+   * CSS 侧 .bg-symbols / .bg-symbols span 使用这两个变量（默认值保持现状）。 */
+  function applyBackgroundIntensity(summary) {
+    const s = summary || {};
+    const active = (typeof s.active === 'number' && isFinite(s.active)) ? Math.max(0, s.active) : 0;
+    const drift = Math.max(BG_DRIFT_MIN_S, Math.min(BG_DRIFT_MAX_S, BG_DRIFT_MAX_S - active * 1.5));
+    const op = Math.max(BG_OPACITY_MIN, Math.min(BG_OPACITY_MAX, BG_OPACITY_MIN + active * 0.02));
+    const root = document.documentElement;
+    root.style.setProperty('--bg-drift', drift.toFixed(1) + 's');
+    root.style.setProperty('--bg-opacity', op.toFixed(2));
+  }
+
+  /* ---------------- 轮询启停（回放互斥用，P2） ---------------- */
+  function stopPolling() {
+    if (pollTimer) { window.clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function startPolling() {
+    if (replayMode) return; // 回放中不启动实时轮询
+    poll();
+    if (!pollTimer) pollTimer = window.setInterval(poll, POLL_INTERVAL);
+  }
+
+  /* ---------------- 历史回放（P2） ----------------
+   * 点"加载历史" → GET /api/history?limit=200 → 暂停实时轮询（互斥），
+   * 用 history 一次性重建全部 Agent 快照渲染为卡片（保留入场动画），
+   * 按钮切为"返回实时"，点击后恢复轮询。
+   * 取舍：未做逐条慢速重放，采用"一次性渲染"（事件时序由状态机近似还原），
+   * 保证实现简单且与实时模式互斥；完成/失败的子 Agent 在回放中全部上卡展示。 */
+  async function fetchHistory(limit) {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT * 2);
+    try {
+      const res = await fetch('/api/history?limit=' + (limit || 200), { cache: 'no-store', signal: ctrl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  async function enterReplay() {
+    if (replayMode || replayLoading) return;
+    replayLoading = true;
+    els.historyBtn.disabled = true;
+    try {
+      const data = await fetchHistory(200);
+      if (data.more) console.info('[vc-dashboard] 历史超过 200 条，仅回放最近 200 条');
+      const agents = buildAgentsFromHistory(data.events);
+      replayMode = true;          // 先置位：此后的 render / SSE / 定时器均不再触发实时刷新
+      stopPolling();
+      setReplayUi(true);
+      // 预置状态快照：回放渲染不触发"新出现/完成"判定 → 不产生火柴人洪流，
+      // 也不逐条引爆离场动画；卡片入场动画（.enter）保留
+      prevAgentMap = new Map(agents.map(function (a) { return [a.id, normalizeStatus(a.status)]; }));
+      stickmanSeeded = true;
+      lastMainAgentCallCount = mainAgentCallCount(agents); // 同步派发计数，避免回放触发派发火柴人
+      clearAllCards();
+      // 回放用重建快照的 active 数驱动背景强度（summary 形状对齐 /api/state）
+      const activeCount = agents.filter(function (a) {
+        const st = normalizeStatus(a.status);
+        return st === 'queued' || st === 'tool' || st === 'thinking' || st === 'asking';
+      }).length;
+      render({ updatedAt: null, agents: agents, summary: { active: activeCount, total: agents.length } });
+      announce(agents.length ? '历史回放：共 ' + agents.length + ' 个 Agent' : '历史为空，无 Agent 记录');
+    } catch (err) {
+      console.warn('[vc-dashboard] 加载历史失败：', err);
+      announce('加载历史失败');
+    } finally {
+      replayLoading = false;
+      els.historyBtn.disabled = false;
+    }
+  }
+
+  function exitReplay() {
+    if (!replayMode) return;
+    replayMode = false;
+    setReplayUi(false);
+    startPolling();               // 恢复实时轮询（立即拉一次 + 定时器）
+    announce('已返回实时');
+  }
+
+  function setReplayUi(replaying) {
+    els.historyBtn.classList.toggle('hidden', replaying);
+    els.backLiveBtn.classList.toggle('hidden', !replaying);
+  }
+
+  /* 由 /api/history 的 events 重建 Agent 快照（对齐服务端 applyEvent 状态机的简化版）。
+   * 返回 toAgentView 形状的对象数组，供 render() 复用现有卡片渲染与动画。 */
+  function parseDetail(d) {
+    if (typeof d === 'string') {
+      try { return JSON.parse(d); } catch (err) { return null; }
+    }
+    return d && typeof d === 'object' ? d : null;
+  }
+
+  function buildAgentsFromHistory(events) {
+    const map = new Map();
+    let lastKey = null;                 // 无 agent 归属的 notification 挂到最近活跃 key
+    const pendingNames = [];            // pre_tool_use Agent 派发登记的任务描述（LIFO 消费）
+    const get = function (key, type) {
+      let a = map.get(key);
+      if (!a) {
+        a = {
+          id: key, type: type || 'agent', name: null, status: null, currentTool: null,
+          toolCount: 0, startTime: null, endTime: null, lastSeen: null, history: [],
+          stopRequested: false
+        };
+        map.set(key, a);
+      }
+      return a;
+    };
+    const pushH = function (a, note) {
+      const h = a.history;
+      if (h.length && h[h.length - 1] === note) return;
+      h.push(note);
+      if (h.length > 6) h.splice(0, h.length - 6);
+    };
+
+    (Array.isArray(events) ? events : []).forEach(function (e) {
+      if (!e || typeof e.hook !== 'string') return;
+      const isNotif = e.hook === 'notification';
+      const key = isNotif ? lastKey
+        : (e.agent != null && String(e.agent) !== '' ? String(e.agent) : 'main');
+      const ts = typeof e.ts === 'string' ? e.ts : '';
+      const detail = parseDetail(e.detail);
+      switch (e.hook) {
+        case 'subagent_start': {
+          const a = get(key, e.type || 'agent');
+          if (!a.startTime) a.startTime = ts;
+          a.type = e.type || a.type || 'agent';
+          a.status = 'queued';
+          a.lastSeen = ts;
+          pushH(a, 'start');
+          if (!a.name) {
+            const desc = (detail && (detail.prompt || detail.description || detail.prompt_text)) ||
+              (pendingNames.length ? pendingNames.pop().name : null);
+            if (typeof desc === 'string' && desc) a.name = desc;
+          }
+          break;
+        }
+        case 'pre_tool_use': {
+          const a = get(key, e.type || 'agent');
+          if (!a.startTime) a.startTime = ts;
+          a.status = 'tool';
+          if (e.tool != null) {
+            a.currentTool = String(e.tool);
+            a.toolCount = (a.toolCount || 0) + 1;
+            pushH(a, 'tool:' + a.currentTool);
+          } else {
+            pushH(a, 'tool');
+          }
+          if (e.tool === 'Agent' && detail && detail.tool_input &&
+              typeof detail.tool_input.description === 'string' && detail.tool_input.description) {
+            pendingNames.push({ name: detail.tool_input.description, ts: ts });
+          }
+          a.lastSeen = ts;
+          break;
+        }
+        case 'post_tool_use': {
+          const a = get(key, e.type || 'agent');
+          if (!a.startTime) a.startTime = ts;
+          a.status = 'thinking';
+          a.lastSeen = ts;
+          pushH(a, 'thinking');
+          break;
+        }
+        case 'notification': {
+          if (String(e.detail || e.message || '').includes('agent_needs_input')) {
+            const a = map.get(key);
+            if (a) { a.status = 'asking'; a.lastSeen = ts; pushH(a, 'asking'); }
+          }
+          break;
+        }
+        case 'subagent_stop': {
+          if (key === 'main') break; // 主会话不产生 stop 标记（对齐服务端防御逻辑）
+          const a = get(key, e.type || 'agent');
+          let failed = e.status === 'error' || e.status === 'failed';
+          if (!failed && detail && (detail.error ||
+              (detail.result && detail.result.status === 'error') ||
+              detail.status === 'error' || detail.success === false)) {
+            failed = true;
+          }
+          a.status = failed ? 'failed' : 'done';
+          a.endTime = ts;
+          a.lastSeen = ts;
+          pushH(a, failed ? 'error' : 'done');
+          break;
+        }
+        default: break; // 未知 hook 忽略
+      }
+      if (!isNotif && key) lastKey = key;
+    });
+
+    const arr = [...map.values()];
+    arr.sort(function (x, y) { return (x.startTime || '').localeCompare(y.startTime || ''); });
+    return arr;
   }
 
   /* ---------------- 停止子 Agent ----------------
@@ -265,6 +647,9 @@
     const agents = Array.isArray(data.agents) ? data.agents : [];
     renderFooter(data.updatedAt);
 
+    // P2：背景符号联动——summary.active 数量驱动漂移时长与透明度
+    applyBackgroundIntensity(data.summary);
+
     // 方向 B：更新 lastSeen 快照（agent id -> 时间戳），供超时回收判定使用
     updateLastSeenMap(agents);
 
@@ -287,11 +672,15 @@
     hasSubAgents = subList.length > 0;
 
     const mainActive = mainList; // 常驻：不做 done/failed 过滤
-    const subActive = subList.filter(function (a) {
-      return !FOLDED_STATUS[normalizeStatus(a.status)]; // 完成/失败的子 Agent 走拜拜消失，不进活动区
-    }).sort(function (a, b) {
-      return priorityOf(a) - priorityOf(b);
-    });
+    // P2 回放模式：不折叠完成/失败的子 Agent，历史快照全部上卡展示最终状态；
+    // 实时模式保持原有折叠逻辑（完成/失败走拜拜离场）
+    const subActive = replayMode
+      ? subList.slice().sort(function (a, b) { return priorityOf(a) - priorityOf(b); })
+      : subList.filter(function (a) {
+          return !FOLDED_STATUS[normalizeStatus(a.status)];
+        }).sort(function (a, b) {
+          return priorityOf(a) - priorityOf(b);
+        });
 
     // 本轮各 Agent 状态快照：renderActive 清理与 animateAgentChanges 共用，
     // 保证"刚完成/失败"的判定一致（避免清理路径抢先触发离场、破坏庆祝时序）
@@ -378,6 +767,7 @@
         runStickman('toSub', a);
         showNewTaskTag(a.id); // C：新任务标记
         assignTaskFace(getCardElById(a.id), nowMap); // C：接到任务即"翻脸"😟（无需等火柴人到达）
+        announce('子 Agent ' + displayName(a) + ' 开始'); // P1：无障碍播报新出现
       }
     });
 
@@ -405,8 +795,7 @@
       if (prev && prev !== 'done' && prev !== 'failed' &&
           (now === 'done' || now === 'failed')) {
         const isDone = now === 'done';
-        const isReduced = window.matchMedia &&
-          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const isReduced = isMotionReduced(); // P1：统一按特效密度/系统 reduced-motion 判定
         // 交接第二步：子 Agent 办公小人拿起文件 → 火柴人（持文件）跑回主 Agent 汇报
         const cardEl = getCardElById(a.id);
         setOfficeFile(cardEl, true);
@@ -415,6 +804,14 @@
         // failed 前一刻（如"调用工具中"蓝色 spinner），必须在此一次性改写。
         // 不复用 status-failed / status-done，避免与完成举手/挥手动画互相干扰
         if (!isDone) markCardFailed(cardEl);
+        // P1：音效 + 无障碍播报——完成短促上升音、失败低沉下降音，并写入 aria-live
+        if (isDone) {
+          playChime('done');
+          announce('子 Agent ' + displayName(a) + ' 完成');
+        } else {
+          playChime('failed');
+          announce('子 Agent ' + displayName(a) + ' 失败');
+        }
         // 完成庆祝（仅 done）：粒子散开 ~1.8s 后才进入挥手拜拜；
         // 失败不庆祝（走 .task-failed 失败视觉，不再是"保留 ❌ 抖动"）；
         // 动效敏感用户跳过庆祝与延时
@@ -573,8 +970,9 @@
   function runStickman(direction, agent, isFailed) {
     const layer = els.animLayer;
     if (!layer || !agent || agent.id === 'main') return;
-    // 动效敏感用户：直接不创建火柴人（style.css 另有全局降级）
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    // 动效敏感用户：直接不创建火柴人（P1：统一按特效密度/系统 reduced-motion 判定；
+    // style.css 另有全局降级）
+    if (isMotionReduced()) return;
 
     // 派发（toSub，方向 A）：先入队；若队列空闲立即启动 runQueuedToSub 出队执行，
     // 否则等上一个火柴人的移除回调继续出队（串行排队，同一时刻至多 1 个派发小人）

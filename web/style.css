@@ -48,6 +48,19 @@ body {
 
 .hidden { display: none !important; }
 
+/* 屏幕阅读器专属类（P1）：仅读屏可见、视觉隐藏，供 aria-live 播报区使用 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 主体容器占满页面宽度：看板两栏分别贴向页面两侧，中间留出跑道空间
  * （页面左右留白由 .board-wrap 的 padding 负责，见第 7 节） */
 .wrap { width: 100%; max-width: none; padding: 0; }
@@ -63,13 +76,16 @@ body {
   pointer-events: none;
   font-family: "Cascadia Code", Consolas, "Courier New", monospace;
   color: var(--text);
-  opacity: 0.16;
+  /* P2：背景符号联动——透明度由 --bg-opacity 驱动（active 越多越亮），默认 0.16 保持现状 */
+  opacity: var(--bg-opacity, 0.16);
 }
 
 .bg-symbols span {
   position: absolute;
   opacity: 0;
-  animation: bgDrift var(--dur, 18s) linear infinite;
+  /* P2：漂移时长由 --bg-drift 驱动（active 越多越快），未设置时回退到每个符号的
+   * 随机 --dur（12-24s），再回退 18s，默认值保持现状 */
+  animation: bgDrift var(--bg-drift, var(--dur, 18s)) linear infinite;
   animation-delay: var(--delay, 0s);
 }
 
@@ -157,6 +173,115 @@ body {
   color: var(--muted);
   font-size: 14px;
   letter-spacing: 0.04em;
+}
+
+/* ---------- 4b. 顶部操作区：特效密度 / 音效 / 历史回放（P1/P2） ---------- */
+.header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+
+.ctl-label {
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* 特效密度下拉 */
+.ctl-select {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.ctl-select:focus-visible {
+  outline: 1px solid var(--tool);
+  outline-offset: 1px;
+}
+
+/* 音效开关：滑动开关样式（仍是原生 checkbox，读屏可感知） */
+.ctl-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.ctl-check input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--panel-hover);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.ctl-check input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted-2);
+  transition: transform 0.18s ease, background-color 0.18s ease;
+}
+
+.ctl-check input:checked {
+  background: rgba(var(--tool-rgb), 0.32);
+  border-color: var(--tool);
+}
+
+.ctl-check input:checked::after {
+  transform: translateX(14px);
+  background: var(--tool);
+}
+
+.ctl-check input:focus-visible {
+  outline: 1px solid var(--tool);
+  outline-offset: 2px;
+}
+
+/* 操作按钮（加载历史 / 返回实时） */
+.ctl-btn {
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.ctl-btn:hover:not(:disabled) {
+  background: var(--panel-hover);
+  border-color: var(--muted-2);
+}
+
+.ctl-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ctl-btn:focus-visible {
+  outline: 1px solid var(--tool);
+  outline-offset: 1px;
 }
 
 /* ---------- 6. 主体与空状态 ---------- */
@@ -1424,3 +1549,48 @@ body {
   /* 背景符号 / 空状态雷达与待机小人（方向 C+D）：停用动画并大幅减淡 */
   .bg-symbols span, .empty-radar, .empty-radar::before, .empty-radar::after, .empty-stick { animation: none !important; opacity: 0.05; }
 }
+
+/* ---------- 16b. 特效密度：减少 / 关闭（P1，显式降级） ---------- */
+/* 页头"特效"下拉选择 reduced / off 时通过 body[data-motion] 显式降级：
+ * 规则与上方 @media (prefers-reduced-motion: reduce) 完全一致（reuse 思路），
+ * 只加选择器包裹、不改任何动画本体；auto 仍走系统媒体查询。
+ * 关闭（off）额外隐藏背景符号层。JS 侧同步用 isMotionReduced() 跳过火柴人/音效。 */
+body[data-motion="reduced"] *,
+body[data-motion="reduced"] *::before,
+body[data-motion="reduced"] *::after,
+body[data-motion="off"] *,
+body[data-motion="off"] *::before,
+body[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* 火柴人 / 办公场景专属降级（JS 侧也会跳过火柴人创建） */
+body[data-motion="reduced"] .stickman-runner,
+body[data-motion="off"] .stickman-runner { transition: none; }
+body[data-motion="reduced"] .stickman .leg-left,
+body[data-motion="reduced"] .stickman .leg-right,
+body[data-motion="off"] .stickman .leg-left,
+body[data-motion="off"] .stickman .leg-right { animation: none; }
+body[data-motion="reduced"] .pc-screen-glow,
+body[data-motion="off"] .pc-screen-glow { animation: none !important; }
+body[data-motion="reduced"] .stick-dust,
+body[data-motion="off"] .stick-dust,
+body[data-motion="reduced"] .card-pop,
+body[data-motion="off"] .card-pop { animation: none !important; }
+
+/* 背景符号 / 空状态雷达与待机小人：停用动画并大幅减淡 */
+body[data-motion="reduced"] .bg-symbols span,
+body[data-motion="reduced"] .empty-radar,
+body[data-motion="reduced"] .empty-radar::before,
+body[data-motion="reduced"] .empty-radar::after,
+body[data-motion="reduced"] .empty-stick,
+body[data-motion="off"] .bg-symbols span,
+body[data-motion="off"] .empty-radar,
+body[data-motion="off"] .empty-radar::before,
+body[data-motion="off"] .empty-radar::after,
+body[data-motion="off"] .empty-stick { animation: none !important; opacity: 0.05; }
+
+/* 关闭：背景符号层整个不显示 */
+body[data-motion="off"] .bg-symbols { display: none; }

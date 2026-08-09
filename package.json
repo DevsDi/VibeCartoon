@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/server.mjs",
     "test": "node tests/run.mjs",
+    "test:unit": "node tests/collect-unit.mjs",
     "test:cleanup": "node tests/cleanup.mjs"
   },
   "devDependencies": {

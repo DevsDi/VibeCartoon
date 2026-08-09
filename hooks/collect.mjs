@@ -34,6 +34,20 @@ const HOOK_MAP = {
 
 // 脱敏黑名单：字段名匹配即整体替换为 [REDACTED]
 const REDACT_KEY = /api[_-]?key|token|secret|password|authorization|credential|BEGIN[\s\S]*KEY/i;
+
+// 值级敏感字段：字符串值命中常见密钥样式即替换为 [REDACTED]（大小写敏感）
+//   sk-*   -> Anthropic 密钥
+//   Bearer -> 认证头令牌
+//   ghp_ / gho_ / github_pat_ -> GitHub Personal / OAuth / Fine-grained PAT
+//   xoxb/a/p/r/s- -> Slack token
+const REDACT_VALUE =
+  /sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}/g;
+
+// 读入 stdin 的总字节上限：8MB，超出直接丢弃本条事件（不崩，恒 exit 0）
+const MAX_STDIN_BYTES = 8 * 1024 * 1024;
+// 参与解析/拷贝的原始 JSON 字节上限：1MB，先按字节截断再解析，避免超大对象拷贝撑爆内存
+const MAX_INPUT_BYTES = 1 << 20;
+
 // 普通字符串截断阈值
 const MAX_STR = 250;
 // 序列化后的 detail 总长度上限
@@ -43,11 +57,18 @@ const DETAIL_CAP = 2000;
 // 读 stdin
 // ---------------------------------------------------------------------------
 async function readStdin() {
-  // 终端直接运行且无管道输入时避免挂死
-  if (process.stdin.isTTY) return "";
+  // 终端直接运行且无管道输入时避免挂死（空 Buffer，走正常空 JSON 路径）
+  if (process.stdin.isTTY) return Buffer.alloc(0);
   const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    total += chunk.length;
+    // 累计超过读入上限：整条丢弃，返回 null，由 main 处理为退出 0
+    if (total > MAX_STDIN_BYTES) return null;
+    chunks.push(chunk);
+  }
+  // 返回 Buffer 而非字符串，便于后续按字节 subarray 截断（视图拷贝，不再二次整串拷贝）
+  return Buffer.concat(chunks);
 }
 
 // ---------------------------------------------------------------------------
@@ -65,9 +86,17 @@ async function logError(msg) {
 // ---------------------------------------------------------------------------
 // 脱敏与截断
 // ---------------------------------------------------------------------------
+// 值级敏感替换：字符串中的常见密钥样式（sk-/Bearer/ghp_/gho_/github_pat_/Slack xox*）替换为 [REDACTED]
+// 整串命中 → 整体变 [REDACTED]；局部藏在长文本里 → 仅命中片段被替换，其余保留
+function redactText(text) {
+  return typeof text === "string" ? text.replace(REDACT_VALUE, "[REDACTED]") : text;
+}
+
 function sanitizeString(val) {
   // 私钥/密钥文本块整体替换
   if (/BEGIN[\s\S]*KEY/.test(val) || /^-----BEGIN/.test(val)) return "[REDACTED]";
+  // 值级敏感匹配（脱敏后再截断，避免截断后的残留密钥片段漏出去）
+  val = redactText(val);
   if (val.length > MAX_STR) return val.slice(0, MAX_STR) + "…[truncated]";
   return val;
 }
@@ -141,7 +170,11 @@ function buildLine(payload) {
   const detailObj = sanitizeObject(payload);
   for (const k of [...EXCLUDED]) delete detailObj[k];
   let detail = Object.keys(detailObj).length > 0 ? JSON.stringify(detailObj) : null;
-  if (detail && detail.length > DETAIL_CAP) detail = detail.slice(0, DETAIL_CAP) + "…[truncated]";
+  if (detail) {
+    // 序列化后的整段文本再过一遍值脱敏，兜底嵌套拼接/转义等未覆盖的密钥样式残留，之后才做既有截断
+    detail = redactText(detail);
+    if (detail.length > DETAIL_CAP) detail = detail.slice(0, DETAIL_CAP) + "…[truncated]";
+  }
 
   return {
     ts: new Date().toISOString(),
@@ -159,10 +192,21 @@ function buildLine(payload) {
 // 入口
 // ---------------------------------------------------------------------------
 async function main() {
-  const input = await readStdin().catch(async (e) => {
+  const raw = await readStdin().catch(async (e) => {
     await logError(`读取 stdin 失败: ${e.stack ?? e.message}`);
-    return "";
+    return Buffer.alloc(0);
   });
+
+  // 读入超限（> 8MB）：直接丢弃本条事件，不解析不写文件，保持恒 exit 0
+  if (raw == null) {
+    await logError(`stdin 超过 ${MAX_STDIN_BYTES} 字节上限，本条事件被丢弃`);
+    if (DRY) console.error(`[collect] stdin 超过 ${MAX_STDIN_BYTES} 字节上限，本条事件被丢弃`);
+    return 0;
+  }
+
+  // 超大输入先按字节截断（Buffer.subarray 为无拷贝视图）：截断后的 JSON 通常解析失败 → 走日志路径 exit 0，
+  // 避免全量 JSON.parse + 深拷贝把内存撑爆。单条 detail 长度另由 DETAIL_CAP 限制。
+  const input = (raw.length > MAX_INPUT_BYTES ? raw.subarray(0, MAX_INPUT_BYTES) : raw).toString("utf8");
 
   let payload;
   try {
