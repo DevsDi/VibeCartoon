@@ -96,19 +96,15 @@ curl "http://localhost:8617/api/events?since=123456"    # 从偏移 123456 字�
 
 ### 4.2 注入测试事件
 
-`tests/helpers/inject.mjs` 提供 `eventLine()` 与 `injectEvents()`，可把构造的 hook 事件按 `collect.mjs` 同格式追加到 `data/events.jsonl`，驱动真实看板渲染（前端 600ms 轮询，追加后约 0.7 秒内可见）：
+手工验证时可把构造的 hook 事件通过管道交给 `hooks/collect.mjs`，它会按归一化格式追加到 `data/events.jsonl`（前端 600ms 轮询，追加后约 0.7 秒内可见）：
 
-```js
-import { eventLine, injectEvents } from "./tests/helpers/inject.mjs";
-
-await injectEvents([
-  eventLine({ hook: "subagent_start", agent: "demo-1", type: "general" }),
-  eventLine({ hook: "pre_tool_use", agent: "demo-1", tool: "Bash" }),
-  eventLine({ hook: "subagent_stop", agent: "demo-1", status: "success" }),
-]);
+```bash
+echo '{"hook":"SubagentStart","agent_id":"demo-1","agent_type":"general"}' | node hooks/collect.mjs
+echo '{"hook":"PreToolUse","agent_id":"demo-1","tool":"Bash"}' | node hooks/collect.mjs
+echo '{"hook":"SubagentStop","agent_id":"demo-1","status":"success"}' | node hooks/collect.mjs
 ```
 
-> 测试事件请使用 `e2e-` 前缀的 agent id（注入助手注释约定），便于后续清理；服务端内存中的测试 Agent 只能等 `STALE_MS` 超时自动回收，删文件不会清除内存状态。
+> 测试事件请使用 `e2e-` 前缀的 agent id，便于 `tests/cleanup.mjs` 清理；服务端内存中的测试 Agent 只能等 `STALE_MS` 超时自动回收，删文件不会清除内存状态。
 
 ### 4.3 清理测试事件
 

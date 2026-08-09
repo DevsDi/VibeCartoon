@@ -22,7 +22,7 @@ Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 
 ### 安装与启动
 
 ```bash
-# 1. 安装依赖（当前仅 playwright 为 devDependency，用于 E2E 测试）
+# 1. 安装依赖（当前无第三方依赖；playwright 已随 E2E 测试一并移除）
 npm install
 
 # 2. 启动看板服务
@@ -138,56 +138,43 @@ vc-dashboard/
 │   ├── events.jsonl        # 事件文件（超过 10MB 自动轮转）
 │   ├── stop-signals.jsonl  # 停止请求信号（POST /api/agents/:id/stop 追加，外部主会话消费）
 │   └── collect.log         # 采集器异常日志
-└── tests/                  # E2E 测试（详见 tests/README.md）
-    ├── run.mjs             # 测试入口
-    ├── cleanup.mjs         # 清理测试注入的 e2e- 事件行
-    ├── helpers/
-    │   ├── inject.mjs      # 事件注入助手（eventLine / injectEvents）
-    │   └── board.mjs       # Playwright 看板封装与 DOM 断言
-    └── cases/              # 各 E2E 用例
+└── tests/                  # collect 单元测试（详见 tests/README.md）
+    ├── collect-unit.mjs    # 采集器单元测试（纯 Node 零依赖，npm run test:unit）
+    └── cleanup.mjs         # 清理 events.jsonl 中残留的 e2e- 测试事件行
 ```
 
 ## API 说明
 
-服务端提供只读 GET 接口（含历史回放 `GET /api/history` 与 SSE 实时流 `GET /api/stream`），另开放 `POST /api/agents/:id/stop` 用于登记「停止子 Agent」请求；除该 POST 外的其他非 GET 方法仍返回 `405`。
+服务端提供只读 GET 接口（含 SSE 实时流 `GET /api/stream` 等），另开放 `POST /api/agents/:id/stop` 用于登记「停止子 Agent」请求；除该 POST 外的其他非 GET 方法仍返回 `405`。
 
 | 接口 | 用途 | 返回概要 |
 |---|---|---|
 | `GET /api/health` | 健康检查 | `{ ok: true, fileBytes }`（事件文件当前字节数） |
 | `GET /api/state` | 看板聚合数据 | `{ updatedAt, agents: [...], summary: {...} }` |
-| `GET /api/history` | 历史事件回放 | 事件文件中的历史事件序列，供回放/回溯看板时间线 |
 | `GET /api/stream` | SSE 实时事件流 | `text/event-stream`，持续推送新采集到的事件 |
 | `GET /api/events` | 原始事件调试 | `{ events: [...], nextOffset }` |
 | `POST /api/agents/:id/stop` | 登记停止子 Agent 请求 | `200 { ok: true, agent }` / `404`（不存在或已离场）/ `409`（已 `done`/`failed` 或主 Agent） |
 
 - `/api/state`：采用「增量读」事件文件 + 状态机聚合。`agents` 为按开始时间升序的全部 Agent，每个 Agent 含 `id / type / name / status / currentTool / toolCount / startTime / endTime / lastSeen / history / stopRequested`（`history` 最多保留最近 6 条状态简记；`stopRequested` 为布尔，表示该 Agent 是否有未失效的停止请求信号）；`summary` 统计 `total / active / done / queued / thinking / tool / failed / asking` 各档数量。文件被截断或轮转时偏移自动归零重读。
 - `/api/events`：调试用，支持 `?since=<offset>` 从指定字节偏移读取原始事件，不推进 `/api/state` 的聚合偏移。
-- `/api/history`：历史回放接口，返回事件文件中的历史事件序列，便于回溯已结束的会话或重建时间线。
 - `/api/stream`：SSE 实时流（`text/event-stream`），服务端持续向订阅端推送新采集的事件，前端可据此即时刷新，弥补 600ms 轮询的延迟。
 - `POST /api/agents/:id/stop`：校验 Agent 存在且处于存活态（非 `done`/`failed`/已离场），通过后原子追加一行 JSON 到独立文件 `data/stop-signals.jsonl`（**禁止写 `events.jsonl`**，避免与采集器并发冲突）。信号文件每行格式：`{"ts":"<ISO 时间>","agent":"<子 Agent id>","status":"requested"}`。真实中断由外部（主会话）消费该文件执行；服务端会周期清理「已不在 agents 中 / 已 `done`/`failed` / 超过 `STOP_REQUEST_TTL_MS`」的条目以保持文件小。
 
 ## 测试
 
-E2E 测试通过向 `data/events.jsonl` 追加构造事件（格式与 `hooks/collect.mjs` 输出一致），驱动真实看板的前端渲染与动画，基于真实 DOM 断言。
+当前仅保留 **collect 采集器单元测试**（纯 Node 零依赖，无需启动服务/浏览器）。Playwright E2E 测试框架（17 个用例）已移除。
 
 ```bash
-# 先启动看板服务（测试前置条件）
-npm start
+# 运行 collect 单元测试（无需启动服务）
+npm run test:unit
 
-# 运行全部用例（默认无头模式）
-npm test
-
-# 常用参数
-npm test -- --headful           # 有头模式，可观察动画
-npm test -- --only=01-失败       # 按用例名前缀过滤
-npm test -- --keep-events       # 测试后不清理 events.jsonl 中的注入行
-npm test -- --report=out.json   # 指定报告路径（默认 tests/reports/latest.json）
+# 清理 events.jsonl 中残留的 e2e- 测试事件行（历史 E2E 遗留，需时手动执行）
+node tests/cleanup.mjs
 ```
 
-- **环境要求**：Node.js >= 18；浏览器优先使用系统 Edge / Chrome，也可设 `VC_TEST_BROWSER=chromium` 用 Playwright 自带内核（需先 `npx playwright install chromium`）。
-- **测试工具**：
-  - `tests/helpers/inject.mjs`：`eventLine()` 构造事件行、`injectEvents()` 按序追加到 `events.jsonl`；测试事件统一使用 `e2e-` 前缀的 agent id。
-  - `tests/cleanup.mjs`：把 `events.jsonl` 中 `e2e-` 前缀的行过滤掉（原子替换），`npm test` 结束后默认自动执行；也可手动 `node tests/cleanup.mjs`。
-- **注意事项**：测试运行期间看板会短暂出现 `e2e-` 卡片；服务端内存中的测试 Agent 无法通过删文件清除，由 `STALE_MS`（10 分钟）超时自动回收；请避免测试期间操作 Claude Code，以免真实事件干扰 main 相关断言。
+- **测试范围**：`tests/collect-unit.mjs` 直接以 `--dry` 模式通过 `child_process` 调用 `hooks/collect.mjs`（不写事件文件），断言三个契约：
+  1. 值级脱敏（sk- / Bearer / ghp_ / gho_ / xox* 等密钥样式 → `[REDACTED]`）；
+  2. 输入限长（stdin 超 8MB 直接丢弃且恒 exit 0）；
+  3. 正常事件原样透传（hook 归一化，字段不误删/误脱敏）。
 
 更完整的测试说明见 `tests/README.md`。

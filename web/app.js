@@ -126,9 +126,6 @@
   let motionLevel = 'auto';
   let soundOn = true;
   let audioCtx = null;            // WebAudio 上下文：首次用户交互后初始化（autoplay 政策）
-  /* P2：历史回放状态（与实时模式互斥） */
-  let replayMode = false;         // 回放中：暂停实时轮询
-  let replayLoading = false;      // "加载历史"请求进行中（防重复点击）
   /* P3：SSE 加速刷新状态 */
   let sse = null;
   let sseFails = 0;
@@ -162,11 +159,9 @@
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
 
-    // P1/P2：特效密度 / 音效开关 / 历史回放控件 / aria-live 播报区
+    // P1：特效密度 / 音效开关控件 / aria-live 播报区
     els.motionSelect = document.getElementById('motion-select');
     els.soundToggle = document.getElementById('sound-toggle');
-    els.historyBtn = document.getElementById('history-btn');
-    els.backLiveBtn = document.getElementById('back-live-btn');
     els.liveRegion = document.getElementById('status-live');
     loadPrefs();
     applyMotion();
@@ -174,8 +169,6 @@
     els.motionSelect.addEventListener('change', function () { setMotion(els.motionSelect.value); });
     els.soundToggle.checked = soundOn;
     els.soundToggle.addEventListener('change', function () { setSound(els.soundToggle.checked); });
-    els.historyBtn.addEventListener('click', enterReplay);
-    els.backLiveBtn.addEventListener('click', exitReplay);
 
     // 音效解锁（autoplay 政策）：首次用户交互（点击/触摸/按键）后初始化 AudioContext，
     // 解铃前 playChime 不播任何声音（默认不打扰）
@@ -221,7 +214,7 @@
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) {
         stopPolling();
-      } else if (!replayMode) {
+      } else {
         startPolling();
       }
     });
@@ -229,11 +222,10 @@
 
   /* ---------------- 轮询 ---------------- */
   async function poll() {
-    if (polling || replayMode) return; // P2：回放中暂停轮询（与实时模式互斥）
+    if (polling) return; // 轮询互斥：上一轮请求未完成则跳过本轮
     polling = true;
     try {
       const data = await fetchState();
-      if (replayMode) return; // 回放已接管：丢弃在途的实时结果，避免覆盖回放渲染
       setOnline(true);
       render(data);
     } catch (err) {
@@ -375,7 +367,7 @@
         try {
           const msg = JSON.parse(ev.data || '');
           if (msg && msg.type === 'event') {
-            if (!replayMode) poll(); // 新事件到达：立即增量刷新（回放中忽略）
+            poll(); // 新事件到达：立即增量刷新
           }
         } catch (err) { /* 非 JSON 数据忽略 */ }
       };
@@ -407,191 +399,14 @@
     root.style.setProperty('--bg-opacity', op.toFixed(2));
   }
 
-  /* ---------------- 轮询启停（回放互斥用，P2） ---------------- */
+  /* ---------------- 轮询启停（页面不可见时暂停用） ---------------- */
   function stopPolling() {
     if (pollTimer) { window.clearInterval(pollTimer); pollTimer = null; }
   }
 
   function startPolling() {
-    if (replayMode) return; // 回放中不启动实时轮询
     poll();
     if (!pollTimer) pollTimer = window.setInterval(poll, POLL_INTERVAL);
-  }
-
-  /* ---------------- 历史回放（P2） ----------------
-   * 点"加载历史" → GET /api/history?limit=200 → 暂停实时轮询（互斥），
-   * 用 history 一次性重建全部 Agent 快照渲染为卡片（保留入场动画），
-   * 按钮切为"返回实时"，点击后恢复轮询。
-   * 取舍：未做逐条慢速重放，采用"一次性渲染"（事件时序由状态机近似还原），
-   * 保证实现简单且与实时模式互斥；完成/失败的子 Agent 在回放中全部上卡展示。 */
-  async function fetchHistory(limit) {
-    const ctrl = new AbortController();
-    const timer = window.setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT * 2);
-    try {
-      const res = await fetch('/api/history?limit=' + (limit || 200), { cache: 'no-store', signal: ctrl.signal });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return await res.json();
-    } finally {
-      window.clearTimeout(timer);
-    }
-  }
-
-  async function enterReplay() {
-    if (replayMode || replayLoading) return;
-    replayLoading = true;
-    els.historyBtn.disabled = true;
-    try {
-      const data = await fetchHistory(200);
-      if (data.more) console.info('[vc-dashboard] 历史超过 200 条，仅回放最近 200 条');
-      const agents = buildAgentsFromHistory(data.events);
-      replayMode = true;          // 先置位：此后的 render / SSE / 定时器均不再触发实时刷新
-      stopPolling();
-      setReplayUi(true);
-      // 预置状态快照：回放渲染不触发"新出现/完成"判定 → 不产生火柴人洪流，
-      // 也不逐条引爆离场动画；卡片入场动画（.enter）保留
-      prevAgentMap = new Map(agents.map(function (a) { return [a.id, normalizeStatus(a.status)]; }));
-      stickmanSeeded = true;
-      lastMainAgentCallCount = mainAgentCallCount(agents); // 同步派发计数，避免回放触发派发火柴人
-      clearAllCards();
-      // 回放用重建快照的 active 数驱动背景强度（summary 形状对齐 /api/state）
-      const activeCount = agents.filter(function (a) {
-        const st = normalizeStatus(a.status);
-        return st === 'queued' || st === 'tool' || st === 'thinking' || st === 'asking';
-      }).length;
-      render({ updatedAt: null, agents: agents, summary: { active: activeCount, total: agents.length } });
-      announce(agents.length ? '历史回放：共 ' + agents.length + ' 个 Agent' : '历史为空，无 Agent 记录');
-    } catch (err) {
-      console.warn('[vc-dashboard] 加载历史失败：', err);
-      announce('加载历史失败');
-    } finally {
-      replayLoading = false;
-      els.historyBtn.disabled = false;
-    }
-  }
-
-  function exitReplay() {
-    if (!replayMode) return;
-    replayMode = false;
-    setReplayUi(false);
-    startPolling();               // 恢复实时轮询（立即拉一次 + 定时器）
-    announce('已返回实时');
-  }
-
-  function setReplayUi(replaying) {
-    els.historyBtn.classList.toggle('hidden', replaying);
-    els.backLiveBtn.classList.toggle('hidden', !replaying);
-  }
-
-  /* 由 /api/history 的 events 重建 Agent 快照（对齐服务端 applyEvent 状态机的简化版）。
-   * 返回 toAgentView 形状的对象数组，供 render() 复用现有卡片渲染与动画。 */
-  function parseDetail(d) {
-    if (typeof d === 'string') {
-      try { return JSON.parse(d); } catch (err) { return null; }
-    }
-    return d && typeof d === 'object' ? d : null;
-  }
-
-  function buildAgentsFromHistory(events) {
-    const map = new Map();
-    let lastKey = null;                 // 无 agent 归属的 notification 挂到最近活跃 key
-    const pendingNames = [];            // pre_tool_use Agent 派发登记的任务描述（LIFO 消费）
-    const get = function (key, type) {
-      let a = map.get(key);
-      if (!a) {
-        a = {
-          id: key, type: type || 'agent', name: null, status: null, currentTool: null,
-          toolCount: 0, startTime: null, endTime: null, lastSeen: null, history: [],
-          stopRequested: false
-        };
-        map.set(key, a);
-      }
-      return a;
-    };
-    const pushH = function (a, note) {
-      const h = a.history;
-      if (h.length && h[h.length - 1] === note) return;
-      h.push(note);
-      if (h.length > 6) h.splice(0, h.length - 6);
-    };
-
-    (Array.isArray(events) ? events : []).forEach(function (e) {
-      if (!e || typeof e.hook !== 'string') return;
-      const isNotif = e.hook === 'notification';
-      const key = isNotif ? lastKey
-        : (e.agent != null && String(e.agent) !== '' ? String(e.agent) : 'main');
-      const ts = typeof e.ts === 'string' ? e.ts : '';
-      const detail = parseDetail(e.detail);
-      switch (e.hook) {
-        case 'subagent_start': {
-          const a = get(key, e.type || 'agent');
-          if (!a.startTime) a.startTime = ts;
-          a.type = e.type || a.type || 'agent';
-          a.status = 'queued';
-          a.lastSeen = ts;
-          pushH(a, 'start');
-          if (!a.name) {
-            const desc = (detail && (detail.prompt || detail.description || detail.prompt_text)) ||
-              (pendingNames.length ? pendingNames.pop().name : null);
-            if (typeof desc === 'string' && desc) a.name = desc;
-          }
-          break;
-        }
-        case 'pre_tool_use': {
-          const a = get(key, e.type || 'agent');
-          if (!a.startTime) a.startTime = ts;
-          a.status = 'tool';
-          if (e.tool != null) {
-            a.currentTool = String(e.tool);
-            a.toolCount = (a.toolCount || 0) + 1;
-            pushH(a, 'tool:' + a.currentTool);
-          } else {
-            pushH(a, 'tool');
-          }
-          if (e.tool === 'Agent' && detail && detail.tool_input &&
-              typeof detail.tool_input.description === 'string' && detail.tool_input.description) {
-            pendingNames.push({ name: detail.tool_input.description, ts: ts });
-          }
-          a.lastSeen = ts;
-          break;
-        }
-        case 'post_tool_use': {
-          const a = get(key, e.type || 'agent');
-          if (!a.startTime) a.startTime = ts;
-          a.status = 'thinking';
-          a.lastSeen = ts;
-          pushH(a, 'thinking');
-          break;
-        }
-        case 'notification': {
-          if (String(e.detail || e.message || '').includes('agent_needs_input')) {
-            const a = map.get(key);
-            if (a) { a.status = 'asking'; a.lastSeen = ts; pushH(a, 'asking'); }
-          }
-          break;
-        }
-        case 'subagent_stop': {
-          if (key === 'main') break; // 主会话不产生 stop 标记（对齐服务端防御逻辑）
-          const a = get(key, e.type || 'agent');
-          let failed = e.status === 'error' || e.status === 'failed';
-          if (!failed && detail && (detail.error ||
-              (detail.result && detail.result.status === 'error') ||
-              detail.status === 'error' || detail.success === false)) {
-            failed = true;
-          }
-          a.status = failed ? 'failed' : 'done';
-          a.endTime = ts;
-          a.lastSeen = ts;
-          pushH(a, failed ? 'error' : 'done');
-          break;
-        }
-        default: break; // 未知 hook 忽略
-      }
-      if (!isNotif && key) lastKey = key;
-    });
-
-    const arr = [...map.values()];
-    arr.sort(function (x, y) { return (x.startTime || '').localeCompare(y.startTime || ''); });
-    return arr;
   }
 
   /* ---------------- 停止子 Agent ----------------
@@ -672,15 +487,11 @@
     hasSubAgents = subList.length > 0;
 
     const mainActive = mainList; // 常驻：不做 done/failed 过滤
-    // P2 回放模式：不折叠完成/失败的子 Agent，历史快照全部上卡展示最终状态；
-    // 实时模式保持原有折叠逻辑（完成/失败走拜拜离场）
-    const subActive = replayMode
-      ? subList.slice().sort(function (a, b) { return priorityOf(a) - priorityOf(b); })
-      : subList.filter(function (a) {
-          return !FOLDED_STATUS[normalizeStatus(a.status)];
-        }).sort(function (a, b) {
-          return priorityOf(a) - priorityOf(b);
-        });
+    const subActive = subList.filter(function (a) {
+      return !FOLDED_STATUS[normalizeStatus(a.status)];
+    }).sort(function (a, b) {
+      return priorityOf(a) - priorityOf(b);
+    });
 
     // 本轮各 Agent 状态快照：renderActive 清理与 animateAgentChanges 共用，
     // 保证"刚完成/失败"的判定一致（避免清理路径抢先触发离场、破坏庆祝时序）

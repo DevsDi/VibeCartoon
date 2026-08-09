@@ -15,7 +15,10 @@
 import { readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EVENTS_FILE } from "./helpers/inject.mjs";
+
+// 项目根目录（本文件位于 <root>/tests/）
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const EVENTS_FILE = path.join(ROOT, "data", "events.jsonl");
 
 /** 过滤掉 agent id 以 e2e- 开头的行，返回 { removed, kept }。 */
 export async function cleanupInjectedEvents() {

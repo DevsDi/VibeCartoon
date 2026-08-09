@@ -681,47 +681,6 @@ const server = createServer(async (req, res) => {
       return sendJson(req, res, 200, { events, nextOffset: result.size });
     }
 
-    if (pathname === "/api/history") {
-      // 历史事件（供前端"回放"）：读 events.jsonl 全文，按 ?since 增量过滤、?limit 截断。
-      // 只做只读查询，不推进 /api/state 的聚合 offset。detail 可能长达 2000 字符，回放保留原样。
-      const sinceParam = url.searchParams.get("since");
-      let sinceMs = null;
-      if (sinceParam && sinceParam !== "") {
-        const parsed = Date.parse(sinceParam);
-        if (Number.isFinite(parsed)) sinceMs = parsed; // 非法 since 忽略（视为不过滤）
-      }
-      let limit = Number(url.searchParams.get("limit") ?? "");
-      if (!Number.isFinite(limit) || limit <= 0) limit = 200;
-      limit = Math.min(limit, 500);
-
-      let text = "";
-      try { text = await readFile(EVENTS_FILE, "utf8"); } catch { text = ""; }
-      const events = [];
-      for (const line of text.split(/\r?\n/)) {
-        const t = line.trim();
-        if (!t) continue;
-        let e;
-        try { e = JSON.parse(t); } catch { continue; }
-        if (e == null || typeof e !== "object") continue;
-        if (sinceMs != null) {
-          const eMs = Date.parse(typeof e.ts === "string" ? e.ts : "");
-          if (!Number.isFinite(eMs) || eMs < sinceMs) continue;
-        }
-        events.push({
-          ts: typeof e.ts === "string" ? e.ts : "",
-          hook: e.hook ?? null,
-          agent: e.agent ?? null,
-          type: e.type ?? null,
-          tool: e.tool ?? null,
-          status: e.status ?? null,
-          detail: e.detail ?? null, // 保留原样（采集器已脱敏/截断至 ≤2000 字符）
-        });
-      }
-      const more = events.length > limit;
-      const sliced = more ? events.slice(events.length - limit) : events;
-      return sendJson(req, res, 200, { events: sliced, more });
-    }
-
     if (pathname === "/api/stream") {
       // Server-Sent Events 长连接（Content-Type: text/event-stream），断开即清理
       return handleStream(req, res);

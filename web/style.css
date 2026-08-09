@@ -175,7 +175,7 @@ body {
   letter-spacing: 0.04em;
 }
 
-/* ---------- 4b. 顶部操作区：特效密度 / 音效 / 历史回放（P1/P2） ---------- */
+/* ---------- 4b. 顶部操作区：特效密度 / 音效（P1） ---------- */
 .header-actions {
   margin-left: auto;
   display: flex;
@@ -254,34 +254,6 @@ body {
 .ctl-check input:focus-visible {
   outline: 1px solid var(--tool);
   outline-offset: 2px;
-}
-
-/* 操作按钮（加载历史 / 返回实时） */
-.ctl-btn {
-  padding: 4px 14px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: background-color 0.18s ease, border-color 0.18s ease;
-}
-
-.ctl-btn:hover:not(:disabled) {
-  background: var(--panel-hover);
-  border-color: var(--muted-2);
-}
-
-.ctl-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.ctl-btn:focus-visible {
-  outline: 1px solid var(--tool);
-  outline-offset: 1px;
 }
 
 /* ---------- 6. 主体与空状态 ---------- */

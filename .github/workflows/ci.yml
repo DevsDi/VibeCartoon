@@ -1,11 +1,9 @@
-# vc-dashboard CI —— 单元测试（collect）+ E2E（Playwright chromium）
+# vc-dashboard CI —— 单元测试（collect，纯 Node 零依赖）
 #
 # 策略：
 #   - Node 20 / 22 矩阵，ubuntu-latest
-#   - collect 单测纯 Node 零依赖，先跑（无需服务）
-#   - E2E 需要真实看板：后台启动 node server/server.mjs 后轮询 /api/health 就绪再跑；
-#     用例结束时 tests/run.mjs 会自动清理 e2e- 注入行；运行前也显式清空事件文件，保证幂等
-#   - tests/reports/** 作为 artifact 上传（含 latest.json 结构化报告）
+#   - collect 单测（npm run test:unit）纯 Node 零依赖，无需服务/浏览器，npm install 后直接跑
+#   - Playwright E2E 已移除（2026-08）：不再安装浏览器内核、不再启动看板服务、不再上传测试报告
 
 name: CI
 
@@ -42,46 +40,5 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Playwright chromium
-        run: npx playwright install --with-deps chromium
-
       - name: Run collect unit tests
         run: npm run test:unit
-
-      # 幂等：清空之前运行残留的事件/停止信号/日志文件（data/.gitkeep 保留目录）
-      - name: Prepare isolated event data
-        run: rm -f data/events.jsonl data/stop-signals.jsonl data/collect.log data/server.log
-
-      - name: Start server and run E2E tests
-        run: |
-          set -euo pipefail
-          # 后台启动看板服务，日志写 /tmp（测试失败时可回看排查）
-          node server/server.mjs > /tmp/vc-server.log 2>&1 &
-          SRV=$!
-          trap 'kill $SRV 2>/dev/null || true' EXIT
-
-          # 轮询健康检查直到就绪（最长 60s）
-          ready=0
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8617/api/health >/dev/null 2>&1; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" != "1" ]; then
-            echo "== 服务未在 60s 内就绪: http://127.0.0.1:8617/api/health =="
-            cat /tmp/vc-server.log
-            exit 1
-          fi
-
-          # 运行 E2E（浏览器用手动安装的 playwright chromium；run.mjs 结束后自动清理 e2e- 行）
-          VC_TEST_BROWSER=chromium node tests/run.mjs
-
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-report-node${{ matrix.node }}
-          path: tests/reports/**
-          if-no-files-found: warn

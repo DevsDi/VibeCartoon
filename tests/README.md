@@ -1,101 +1,33 @@
-# vc-dashboard E2E 测试（表情体系修复方案 A-F 验收）
+# vc-dashboard collect 单元测试
 
-## 一、运行说明
+> Playwright E2E 测试框架已于 2026-08 移除（含 17 个用例、浏览器内核安装、测试报告）。当前仅保留 collect 采集器单元测试。
+
+## 运行说明
 
 ### 环境要求
 | 项 | 要求 |
 |---|---|
 | Node.js | >= 18（本项目 v24 验证通过） |
-| 看板服务 | 已在 `http://localhost:8617` 运行（`npm start`） |
-| 浏览器 | 系统 Edge 或 Chrome（无需下载内核）；也可 `VC_TEST_BROWSER=chromium` 用 Playwright 自带内核（需先 `npx playwright install chromium`） |
-| 依赖 | `npm install`（已含 playwright devDependency） |
+| 服务/浏览器 | 无需（纯 Node，零依赖） |
 
 ### 运行命令
 ```bash
-npm test                        # 运行全部用例（默认无头模式）
-npm test -- --headful           # 有头模式（可观察动画过程）
-npm test -- --only=01-失败       # 只跑用例名前缀匹配的用例
-npm test -- --keep-events       # 测试后不清理 events.jsonl 中的注入行
-npm test -- --report=out.json   # 指定报告输出路径（默认 tests/reports/latest.json）
-node tests/collect-unit.mjs     # collect 采集器单元测试（纯 Node，零依赖，无需服务/浏览器）
-node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无需）
+npm run test:unit             # collect 单元测试（无需启动服务/浏览器）
+node tests/cleanup.mjs        # 手动清理 events.jsonl 中残留的 e2e- 测试事件行
 ```
 
-`.github/workflows/ci.yml`：Node 20/22 矩阵 → `npm run test:unit` → 后台起服务并轮询 `/api/health` → `VC_TEST_BROWSER=chromium node tests/run.mjs` → 上传 `tests/reports/**`（运行前清空事件文件保证幂等）。
+`.github/workflows/ci.yml`：Node 20/22 矩阵 → `npm install` → `npm run test:unit`（无其它步骤）。
 
 ### 工作原理
-- 测试通过向 `data/events.jsonl` **追加构造事件**（与 `hooks/collect.mjs` 输出同格式）驱动真实看板：
-  注入事件 → 服务端状态机聚合 → 前端 600ms 轮询 `/api/state` → 渲染/动画。
-- 断言基于**真实 DOM**：卡片类名、可见表情（`getComputedStyle` 过滤 `display:none` 层）、
-  状态区内容、CSS 动画（`animationName`/`filter`）、火柴人元素与绿勾 opacity。
-- 每个用例使用独立页面（同一浏览器实例），用例间互不干扰。
+- 通过 `child_process` 以 `--dry` 模式直接调用 `hooks/collect.mjs`（`node hooks/collect.mjs --dry < stdin`），不写 `events.jsonl`，无需启动看板服务。
+- 断言采集器三个核心契约：
 
-### 对真实看板的影响（重要）
-1. 测试事件使用 `e2e-` 前缀的 agent id，运行期间看板会短暂出现测试卡片；
-2. **服务端内存**中的测试 agent 无法通过删文件清除，由 `STALE_MS`（10 分钟）超时自动回收；
-3. 用例 05 会临时把 main 的 lastSeen 改为 90s 前（使 main 短暂显示"待机中"），测试结束会自动注入新事件唤醒；
-4. 测试结束后自动清理 `events.jsonl` 中的 `e2e-` 行（`--keep-events` 可跳过）；
-5. **请避免在测试运行期间操作 Claude Code**（真实事件可能干扰 main 相关断言）。
+| 契约 | 说明 |
+|---|---|
+| 值级脱敏 | `detail` 中 `sk-*` / `Bearer` / `ghp_` / `gho_` / `xox*` 等密钥样式 → `[REDACTED]` |
+| 输入限长 | stdin 超 8MB 直接丢弃本条事件，且恒 exit 0 |
+| 原样透传 | 正常事件 hook 归一化后字段不被误删/误脱敏 |
 
-### 用例清单
-| 文件 | 用例 | 对应方案 |
-|---|---|---|
-| `cases/01-failure.mjs` | 失败流程（✕/😢/红辉光/抖动、交回不带绿勾、main 不显示😄、状态区❌） | A |
-| `cases/02-fast-overlap.mjs` | 快速任务（<7s）无 😟😄 双层重叠 | B |
-| `cases/03-sad-timing.mjs` | 😟（task-assigned）子卡出现即显示，不等 5s | C |
-| `cases/04-handoff-timing.mjs` | done 后 ≥4s 卡片仍在、交接同屏、拜拜保持😄 | D |
-| `cases/05-main-idle.mjs` | main 有子 Agent 不待机 / 60s 无事件才待机 | E |
-| `cases/06-success-regression.mjs` | 完整成功流程表情切换回归 | A-F |
-| `cases/07-reduced-motion.mjs` | reduced-motion 无火柴人/粒子，功能正常 | A/C 附属 |
-| `cases/08-emoji-exclusive.mjs` | 状态类叠加时仅一个表情可见（CSS 互斥） | B/C/D |
-| `cases/09-resurrect.mjs` | 同 id 复活不误删（离场中新卡不被旧定时器删除） | F |
-| `cases/10-tool-screen.mjs` | 按当前工具挂 tool-type-* 类并显隐对应 .screen-* 层 | 方向 C |
-| `cases/11-motion-addons.mjs` | 在途尘土>0/到达归零；done 卡 card-pop 短暂出现；#bg-symbols 14 span；空状态雷达/待机小人 | 方向 A/B/D |
-| `cases/12-concurrent-queue.mjs` | 批量并发子 Agent 的 toSub 火柴人 FIFO 排队：同一时刻至多 1 个 .stickman-runner、依次出现 | 动画完善-方向A |
-| `cases/13-tool-screen-anim.mjs` | tool 状态且挂 tool-type-* 类时对应 .screen-* 子层 animationName≠none；转 thinking 后层隐藏 | 动画完善-方向C |
-| `cases/14-timeout-leave.mjs` | 超时回收挂 .timeout-leaving（打盹😴→熄灯→淡出）；style.css 选择器静态校验 + 页面内差分断言 | 动画完善-方向B |
-| `cases/15-stop-agent.mjs` | 子 Agent 停止：存活子卡渲染「⏹ 停止」→点击 POST /api/agents/:id/stop → 按钮 disabled+「已停止」、卡片灰化、stop-signals.jsonl 落记录、/api/state.stopRequested=true；done/失败/离场子卡与 main 卡无可见停止按钮 | 子 Agent 停止功能 |
-| `cases/16-asking.mjs` | asking 过渡：notification(agent_needs_input) 挂最近活跃子 Agent → status-asking + .ask-ring 气环 + 💬/「等待输入」+ raiseHand 举手动画 | notification→asking |
-| `cases/17-motion-toggle.mjs` | 特效密度开关：localStorage vc-motion=off/reduced → body[data-motion=off/reduced]、控件同步、off 下背景符号隐藏且功能正常 | 特效密度 P1 |
-| `collect-unit.mjs` | collect 单测（纯 Node 零依赖）：值级脱敏 sk-/Bearer/ghp_→[REDACTED]、>8MB 输入丢弃恒 exit 0、正常事件透传。运行 `npm run test:unit` | 采集器质量保障 |
-
-## 二、测试报告模板
-
-测试完成后自动生成结构化报告 `tests/reports/latest.json`，控制台输出失败项清单。
-人工汇总时按以下模板填写：
-
-```
-# vc-dashboard E2E 测试报告（表情体系方案 A-F）
-
-- 日期：____
-- 环境：Node ____ / 浏览器 ____ / 服务运行：是/否
-- 运行方式：`npm test`（附加参数：____）
-- 结果：用例 __ 个，断言通过 __ 项，失败 __ 项（通过率 __%）
-
-## 逐用例结果
-
-| 用例 | 对应方案 | 断言通过/总数 | 结果 | 关键失败项 |
-|---|---|---|---|---|
-| 01-失败流程 | A | x/y | PASS/FAIL | ... |
-| 02-快速任务重叠 | B | x/y | PASS/FAIL | ... |
-| ... | ... | ... | ... | ... |
-
-## 失败项详情（Tester 结论）
-
-1. 【方案A】F8 失败表情 😢 —— 期望显示😢，实际显示 ____。
-   结论：____（如"当前实现无😢表情层，需 Frontender 补充"）
-2. ...（每条含：期望 / 实际 / 涉及文件与行号 / 复现步骤 / 影响范围 / 建议）
-
-## 通过项确认
-
-- 方案 D 离场延迟、方案 B celebrating 阶段互斥、reduced-motion 降级等已符合预期。
-
-## 回归风险
-
-- 测试期间注入的 e2e agent 于 10 分钟后自动回收；events.jsonl 已清理。
-- 测试 05 对 main 的临时影响已恢复。
-
-## 建议
-
-- 修复顺序建议：...；修复后重新运行 `npm test -- --only=xx` 回归验证。
-```
+## 遗留说明
+- `tests/cleanup.mjs` 保留用于清理历史 E2E 注入到 `data/events.jsonl` 的 `e2e-` 前缀行（原子替换，手动执行）。
+- 历史 E2E 产物（`tests/reports/`）已随框架移除。
