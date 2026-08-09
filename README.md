@@ -6,10 +6,10 @@ Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 
 
 - **两栏看板布局**：左侧为「主 Agent」区，右侧为「子 Agent」区。底层是 3 列 CSS Grid（主栏 `380px` + 中间火柴人跑道 + 子栏 `380px`），整体水平居中（容器上限 1440px），随窗口宽度响应式收窄。
 - **完整状态体系**：`queued`（排队中）/ `thinking`（思考中）/ `tool`（调用工具中）/ `asking`（等待输入）/ `done`（已完成）/ `failed`（失败），主 Agent（`main`）常驻左栏且不参与超时回收；任何 Agent 超过 `STALE_MS`（10 分钟）无事件即被服务端回收。
-- **火柴人任务动画**：新子 Agent 出现或主 Agent 补充派发任务时，火柴人手持文件从主 Agent 卡片跑向子 Agent 卡片（toSub，😎）；子 Agent 完成/失败后火柴人跑回主 Agent 汇报（backToMain，done → 😄 带绿勾，failed → 😢 不带勾），并触发「收到 / 驳回」闪光与子卡挥手拜拜离场。首次渲染有 `stickmanSeeded` 守卫，页面刷新不会涌出一堆火柴人。
+- **火柴人任务动画**：新子 Agent 出现或主 Agent 补充派发任务时，火柴人手持文件从主 Agent 卡片跑向子 Agent 卡片（toSub，😎）；子 Agent 完成/失败后火柴人跑回主 Agent 汇报（backToMain，done → 😄 带绿勾，failed → 😢 不带勾），并触发「收到 / 驳回」闪光与子卡挥手拜拜离场。`backToMain` 方向的火柴人现在逐帧读取主卡片实时位置（`getBoundingClientRect`），解决 CSS Grid 布局下主卡片位置随子卡片数量动态变化导致的错位问题。首次渲染有 `stickmanSeeded` 守卫，页面刷新不会涌出一堆火柴人。
 - **任务名称解析**：`post_tool_use` 按 `tool_response.agentId` 精确配对子 Agent 名称；`pre_tool_use` 中主 Agent 调用 Agent 工具时登记 `pendingDispatch`（LIFO）作为待消费的任务描述；`subagent_start` 按「精确配对 → LIFO 派发描述 → 事件自带 prompt」三级优先级消费。主 Agent 恒显示「主 Agent」。
 - **子 Agent 停止请求**：存活中的子 Agent（`queued`/`thinking`/`tool`/`asking`）卡片提供「⏹ 停止」按钮，点击向后端发出 `POST /api/agents/:id/stop`，按钮随即变为「⏹ 已停止」并灰化、卡片降饱和；服务端把请求原子追加到独立文件 `data/stop-signals.jsonl`，由外部（主会话）消费该文件执行真实中断。本仓库负责看板侧的「停止请求 + 状态标记」闭环；已 `done`/`failed` 或已离场的 Agent 不提供按钮，主 Agent（`main`）不支持停止。
-- **完成提示音与无障碍播报**：子 Agent 完成/失败时播放短促提示音（完成→上升双音、失败→低沉单音），并写入 aria-live 播报区供屏幕阅读器感知。动效固定跟随系统：系统开启「减少动态」（prefers-reduced-motion）时自动关闭动画与提示音；音效默认开启，受浏览器自动播放策略限制，需先点击页面一次解锁（首次访问时页面顶部会显示「点击页面启用完成音效」轻提示，点击后自动消失）。
+- **完成提示音与无障碍播报**：子 Agent 完成/失败时播放短促提示音（完成→C5→E5→G5 大三和弦，0.35秒；失败→低沉双音），音效峰值为 1.0（最大音量），并写入 aria-live 播报区供屏幕阅读器感知。动效固定跟随系统：系统开启「减少动态」（prefers-reduced-motion）时自动关闭动画与提示音；音效默认开启，受浏览器自动播放策略限制，需先点击页面一次解锁（首次访问时页面顶部会显示「点击页面启用完成音效」轻提示，点击后自动消失）。`playChime()` 函数正确等待 `AudioContext.resume()` 完成后再调度振荡器，确保首次交互后音效可靠播放。
 - **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。脱敏覆盖：字段名黑名单（`api_key`/`token`/`secret`/`password`/`private_key`/`access_key`/`aws_session_token` 等）整体替换；值级敏感样式（`sk-*`/`Bearer`/`ghp_`/`gho_`/`ghr_`/`ghu_`/`xox*`/`AKIA`/`eyJ`(JWT)/`aws_session_token`）逐段替换为 `[REDACTED]`；PEM 证书整串替换。
 - **零运行时依赖**：服务端为纯 Node ESM http server，前端为原生 JS + CSS，无框架、不连外网。
 
@@ -163,7 +163,7 @@ vc-dashboard/
 
 ## 测试
 
-当前仅保留 **collect 采集器单元测试**（纯 Node 零依赖，无需启动服务/浏览器）。Playwright E2E 测试框架（17 个用例）已移除。
+当前仅保留 **collect 采集器单元测试**（纯 Node 零依赖，无需启动服务/浏览器）。Playwright E2E 测试框架及 `.playwright-mcp/` 目录已完全移除，项目中无 Playwright 相关代码。
 
 ```bash
 # 运行 collect 单元测试（无需启动服务）

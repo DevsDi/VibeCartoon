@@ -1,6 +1,6 @@
 # vc-dashboard collect 单元测试
 
-> Playwright E2E 测试框架已于 2026-08 移除（含 17 个用例、浏览器内核安装、测试报告）。当前仅保留 collect 采集器单元测试（12 个用例）。
+> Playwright E2E 测试框架已于 2026-08 彻底移除（含 17 个用例、浏览器内核安装、测试报告、`.playwright-mcp/` 目录）。项目中无 Playwright 相关代码。当前仅保留 collect 采集器单元测试（12 个用例）。
 
 ## 运行说明
 

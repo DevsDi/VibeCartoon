@@ -286,30 +286,41 @@
   function playChime(kind) {
     if (isMotionReduced()) return;   // 系统 reduced-motion 时同步静音
     if (!audioCtx) return;           // 无 WebAudio 支持，静默降级
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(function () { /* 忽略拒绝 */ });
+
+    function scheduleNotes() {
+      try {
+        const ctx = audioCtx;
+        const t0 = ctx.currentTime + 0.02;
+        const notes = kind === 'done'
+          ? [{ f: 523.25, at: 0.0, dur: 0.10 }, { f: 659.25, at: 0.10, dur: 0.10 }, { f: 783.99, at: 0.20, dur: 0.15 }]  // C5 → E5 → G5 大三和弦
+          : [{ f: 311.13, at: 0.0, dur: 0.16 }, { f: 207.65, at: 0.16, dur: 0.26 }]; // E♭4 → G♭3 下行（失败音效不变）
+        notes.forEach(function (n) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = n.f;
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          const a = t0 + n.at;
+          gain.gain.setValueAtTime(0.0001, a);
+          gain.gain.exponentialRampToValueAtTime(1.0, a + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, a + n.dur);
+          osc.start(a);
+          osc.stop(a + n.dur + 0.04);
+        });
+      } catch (err) {
+        console.warn('[playChime] 音效播放失败:', err);
+      }
     }
-    try {
-      const ctx = audioCtx;
-      const t0 = ctx.currentTime + 0.02;
-      const notes = kind === 'done'
-        ? [{ f: 523.25, at: 0.0, dur: 0.13 }, { f: 783.99, at: 0.13, dur: 0.16 }]  // C5 → G5 上行
-        : [{ f: 311.13, at: 0.0, dur: 0.16 }, { f: 207.65, at: 0.16, dur: 0.26 }]; // E♭4 → G♭3 下行
-      notes.forEach(function (n) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = n.f;
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        const a = t0 + n.at;
-        gain.gain.setValueAtTime(0.0001, a);
-        gain.gain.exponentialRampToValueAtTime(0.14, a + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, a + n.dur);
-        osc.start(a);
-        osc.stop(a + n.dur + 0.04);
+
+    // suspended 状态下 resume() 是异步的，必须等待其完成后再调度振荡器
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().then(scheduleNotes).catch(function (err) {
+        console.warn('[playChime] AudioContext resume 失败:', err);
       });
-    } catch (err) { /* 音效失败静默，不影响主流程 */ }
+    } else {
+      scheduleNotes();
+    }
   }
 
   /* aria-live 无障碍播报（P1）：写入可读文本，屏幕阅读器可感知。
@@ -677,7 +688,7 @@
    * path: [{ x, y, dur }, ...] 依次经过的路径点（首点为起点，dur 为到达该点的用时）；
    * totalMs 结束后停止并移除火柴人。
    * onDone（可选）：火柴人从动画层移除后回调一次（方向 A：派发队列据此继续出队）。 */
-  function driveStickman(stick, path, totalMs, onDone) {
+  function driveStickman(stick, path, totalMs, onDone, dynamicTarget) {
     const t0 = performance.now();
     // 滚动补偿（方案：滚动错位修复）：path 坐标是动画开始时一次性读取的
     // getBoundingClientRect 视口坐标，而火柴人容器是 fixed 定位。动画期间页面
@@ -708,6 +719,23 @@
     };
     const step = function (now) {
       const t = Math.min(now - t0, totalMs);
+      // 动态目标（backToMain）：每帧从目标元素读取实时坐标，更新路径末段终点。
+      // 解决 CSS Grid 布局下 main 卡片位置随子卡片数量动态变化导致的火柴人错位。
+      // getBoundingClientRect 返回视口坐标，与火柴人 fixed 定位一致，scrollDelta 补偿滚动。
+      if (dynamicTarget) {
+        const targetRect = dynamicTarget.getBoundingClientRect();
+        if (targetRect && (targetRect.width > 0 || targetRect.height > 0)) {
+          const liveEndX = targetRect.right - 20;
+          const liveEndY = targetRect.top + targetRect.height / 2;
+          path[path.length - 1].x = liveEndX;
+          path[path.length - 1].y = liveEndY;
+          // 同步更新倒数第二路径点（90% 处），保持末段直线路径连贯
+          if (path.length >= 3) {
+            path[path.length - 2].x = path[0].x + (liveEndX - path[0].x) * 0.90;
+            path[path.length - 2].y = path[0].y + (liveEndY - path[0].y) * 0.90;
+          }
+        }
+      }
       // 定位当前所在路径段
       let acc = 0;
       let seg = -1;
@@ -812,7 +840,7 @@
     // 直线过渡，总时长 = STICKMAN_TRAVEL_MS 5s。（旧 <30px 窄屏单列 else 分支为
     // 死代码——布局始终三列，已删除；窄屏溢出由 style.css 横向滚动兜底）
     const totalMs = STICKMAN_TRAVEL_MS;
-    driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
+    driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, undefined, toEl);
 
     // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
     spawnStickDust(stick, totalMs);
