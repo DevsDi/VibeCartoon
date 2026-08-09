@@ -181,3 +181,24 @@ export async function toolScreenSnapshot(page, id) {
 export async function animDustCount(page) {
   return page.$$eval("#anim-layer .stick-dust", (els) => els.length).catch(() => 0);
 }
+
+/** 工具屏动画快照：卡片 tool-type-* 类 + .screen-content 内各 .screen-* 子层的
+ * 计算 display 与 animationName（动画完善-方向C：tool 状态子层应有微动画）。
+ * 卡片不存在返回 null；screen[k] = { display, animationName }，
+ * 子层缺失时 display='missing'、animationName=null。 */
+export async function toolScreenAnimSnapshot(page, id) {
+  return page.$eval(`.agent-card[data-id="${id}"]`, (el) => {
+    const kinds = ["code", "search", "dispatch", "default"];
+    const screen = {};
+    kinds.forEach((k) => {
+      const node = el.querySelector(".screen-content .screen-" + k);
+      if (!node) { screen[k] = { display: "missing", animationName: null }; return; }
+      const cs = getComputedStyle(node);
+      screen[k] = { display: cs.display, animationName: cs.animationName };
+    });
+    return {
+      classes: Array.from(el.classList),
+      screen,
+    };
+  }).catch(() => null);
+}

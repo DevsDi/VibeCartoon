@@ -810,6 +810,80 @@ body {
 .agent-card.tool-type-dispatch:not(.is-leaving) .office-scene:not(.has-file) .screen-dispatch { display: block; }
 .agent-card.tool-type-default:not(.is-leaving) .office-scene:not(.has-file) .screen-default { display: block; }
 
+/* ---------- 10b3. 工具动作微动画（方向 C） ---------- */
+/* 在 28×18 小视口内做 ±5px 幅度的小动画，让屏幕"忙碌"更具体：
+ *   code（写代码）→ 3 条代码行错峰打字；search（搜索）→ 🔍 左右扫视；
+ *   dispatch（派发）→ 📨 飞行；default（其他工具）→ 🛠 旋转。
+ * 关键约束：
+ *   1. SVG emoji 彩色字形只能动 transform / opacity（stroke 无效）；
+ *   2. Firefox 需显式 transform-box: fill-box（同 .office-file 套路），
+ *      使 transform-origin 以字形自身包围盒为基准；
+ *   3. 各动画 100% 帧均为"静止常显"状态——reduced-motion 全局规则
+ *      （animation-duration:0.01ms）下动画瞬移到 100% 帧，敏感用户屏幕不空白；
+ *   4. 仅动 transform/opacity，颜色复用卡片 currentColor / CSS 变量，不硬编码。 */
+
+/* code：3 条代码行错峰"打字"浮现（opacity 0→1 + 1px 上浮，
+ * animation-delay 0/0.25/0.5s，循环约 1.2s） */
+.agent-card.tool-type-code:not(.is-leaving) .office-scene:not(.has-file) .screen-code {
+  animation: screenCodeHold 1.2s ease-in-out infinite;   /* 组级呼吸：保证 .screen-code 自身有动画 */
+}
+.agent-card.tool-type-code:not(.is-leaving) .office-scene:not(.has-file) .screen-code rect {
+  animation: codeLine 1.2s ease-in-out infinite;
+}
+.agent-card.tool-type-code:not(.is-leaving) .office-scene:not(.has-file) .screen-code rect:nth-child(2) { animation-delay: 0.25s; }
+.agent-card.tool-type-code:not(.is-leaving) .office-scene:not(.has-file) .screen-code rect:nth-child(3) { animation-delay: 0.5s; }
+
+@keyframes codeLine {
+  0%        { opacity: 0; transform: translateY(1px); }
+  45%, 100% { opacity: 1; transform: translateY(0); }
+}
+
+/* 代码块整体轻微呼吸（幅度极小，叠加在逐行打字之上） */
+@keyframes screenCodeHold {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.88; }
+}
+
+/* search：🔍 左右扫视（translateX -5px↔5px 来回，1.2s ease-in-out 循环） */
+.agent-card.tool-type-search:not(.is-leaving) .office-scene:not(.has-file) .screen-search {
+  animation: searchSweep 1.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes searchSweep {
+  0%, 100% { transform: translateX(-5px); }
+  50%      { transform: translateX(5px); }
+}
+
+/* dispatch：📨 屏幕左下→右上飞行（translate + scale(0.8→1) + 淡出，0.9s 循环；
+ * 100% 帧回到初始常显状态，reduced-motion 下不空白） */
+.agent-card.tool-type-dispatch:not(.is-leaving) .office-scene:not(.has-file) .screen-dispatch {
+  animation: dispatchFly 0.9s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes dispatchFly {
+  0%, 100% { transform: translate(-4px, 3px) scale(0.8); opacity: 1; }
+  45%      { transform: translate(0, 0) scale(0.9);      opacity: 1; }
+  75%      { transform: translate(4px, -4px) scale(1);   opacity: 0.9; }
+  88%      { transform: translate(5px, -5px) scale(1);   opacity: 0; }
+}
+
+/* default：🛠 原地旋转（transform-box: fill-box; 中心旋转 360°，1.5s linear 循环；
+ * 100% = 360° ≡ 初始状态，常显） */
+.agent-card.tool-type-default:not(.is-leaving) .office-scene:not(.has-file) .screen-default {
+  animation: toolSpin 1.5s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes toolSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
 /* queued：坐着等待，整个场景变暗 */
 .agent-card.status-queued .office-scene { opacity: 0.55; }
 
@@ -1191,6 +1265,41 @@ body {
 
 @keyframes cardBye {
   to { opacity: 0; transform: scale(0.92); }
+}
+
+/* ---------- 13b. 超时回收可视化（方向 B） ---------- */
+/* 服务端按 STALE_MS=10min 超时回收 Agent（从状态中移除），前端由 app.js
+ * detectTimeoutRecycled 给"消失且 lastSeen 过旧"的卡片挂 .timeout-leaving：
+ * 复用 😴 打盹表情层（office-head-idle，原本仅主 Agent status-idle 使用），
+ * 场景"熄灯"（opacity 降低）→ 卡片整体淡出 + 轻微下沉后由 JS 移除 DOM。
+ * 颜色复用卡片状态色 CSS 变量（--sc-rgb 置为 muted 灰），不硬编码。
+ * 写在离场（13）之后：同特异性后写生效，覆盖默认/状态表情层的显隐。 */
+.agent-card.timeout-leaving { --sc: var(--muted); --sc-rgb: 141, 151, 173; }
+
+.agent-card.timeout-leaving .office-head-active { display: none; }
+.agent-card.timeout-leaving .office-head-sub { display: none; }
+.agent-card.timeout-leaving .office-head-sad { display: none; }
+.agent-card.timeout-leaving .office-head-happy { display: none; }
+.agent-card.timeout-leaving .office-head-fail { display: none; }
+.agent-card.timeout-leaving .office-head-idle { display: block; }
+
+/* 打盹脸 + 熄灯：头部灰蓝辉光、场景变暗（差分可观测）。
+ * 熄灯值取 0.4：低于各状态基值（queued 0.55 / 默认 1），保证"超时熄灯"可区分 */
+.agent-card.timeout-leaving .office-head {
+  filter: drop-shadow(0 0 3px rgba(var(--sc-rgb), 0.6));
+}
+.agent-card.timeout-leaving .office-scene { opacity: 0.4; }
+
+/* 整体淡出移除（约 1.5s，与 JS 的 TIMEOUT_LEAVE_MS 对齐） */
+.agent-card.timeout-leaving {
+  animation: timeoutLeave 1.5s ease forwards;
+  border-color: rgba(var(--sc-rgb), 0.4);
+}
+
+@keyframes timeoutLeave {
+  0%   { opacity: 1; transform: none; }
+  55%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translateY(6px) scale(0.96); }
 }
 
 /* ---------- 14. 页脚 ---------- */

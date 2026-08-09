@@ -48,6 +48,9 @@ node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无�
 | `cases/09-resurrect.mjs` | 同 id 复活不误删（离场中新卡不被旧定时器删除） | F |
 | `cases/10-tool-screen.mjs` | 按当前工具挂 tool-type-* 类并显隐对应 .screen-* 层 | 方向 C |
 | `cases/11-motion-addons.mjs` | 在途尘土>0/到达归零；done 卡 card-pop 短暂出现；#bg-symbols 14 span；空状态雷达/待机小人 | 方向 A/B/D |
+| `cases/12-concurrent-queue.mjs` | 批量并发子 Agent 的 toSub 火柴人 FIFO 排队：同一时刻至多 1 个 .stickman-runner、依次出现 | 动画完善-方向A |
+| `cases/13-tool-screen-anim.mjs` | tool 状态且挂 tool-type-* 类时对应 .screen-* 子层 animationName≠none；转 thinking 后层隐藏 | 动画完善-方向C |
+| `cases/14-timeout-leave.mjs` | 超时回收挂 .timeout-leaving（打盹😴→熄灯→淡出）；style.css 选择器静态校验 + 页面内差分断言 | 动画完善-方向B |
 
 ## 二、测试报告模板
 

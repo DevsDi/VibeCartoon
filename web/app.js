@@ -16,6 +16,11 @@
    * 仅影响 main 卡片展示，不改服务端数据；有新事件（lastSeen 刷新）自动恢复真实状态 */
   const IDLE_TIMEOUT = 60000;
 
+  /* 超时回收前端判定阈值（毫秒，方向 B）：对齐服务端 config.mjs 的 STALE_MS=10min。
+   * 服务端超时会回收 Agent（从 /api/state 移除）；前端以"本轮消失 + lastSeen 距今
+   * 超过该值"判定为超时回收，展示"打盹淡出"可视化（见 detectTimeoutRecycled） */
+  const STALE_FRONT_MS = 10 * 60 * 1000;
+
   /* "最近工具"最多显示的条数：只取 history 中的 tool:xxx 条目（简化版，
    * thinking/start/done 等状态项不展示） */
   const TOOL_TAIL = 3;
@@ -81,6 +86,10 @@
   /* 卡片移除动画时长（毫秒）：.removing 淡出过渡 */
   const REMOVE_ANIM_MS = 420;
 
+  /* 超时回收可视化时长（毫秒，方向 B）：.timeout-leaving 打盹淡出动画时长，
+   * 结束后由 JS 移除 DOM（与 style.css 的 timeoutLeave keyframes 时长对齐） */
+  const TIMEOUT_LEAVE_MS = 1500;
+
   /* 卡片入场动画时长（毫秒）：.enter 过渡结束后移除类名 */
   const ENTER_ANIM_MS = 1700;
 
@@ -102,6 +111,18 @@
    * animateAgentChanges 据此抑制 done/failed 时重复创建 backToMain 汇报小人：
    * 子 Agent 完成/失败时若仍有在途派发小人，跳过 backToMain，避免两个小人同时跑回。 */
   const inFlightToSub = new Set();
+
+  /* 派发火柴人串行队列（方向 A）：toSub 派发小人先入队、逐个执行，
+   * 避免多个派发小人同时跑造成视觉重叠（backToMain 汇报不排队，直接执行）。
+   * stickmanQueue 存排队中的 agent.id；stickmanBusy 标记队列正有火柴人在跑，
+   * 为 true 期间新派发只入队不启动，由前一个火柴人的移除回调继续出队。 */
+  let stickmanQueue = [];
+  let stickmanBusy = false;
+
+  /* 方向 B：Agent 上次活动时间快照（agent id -> Date.parse(a.lastSeen) 时间戳）。
+   * 每次 render 更新当前存活 Agent；用于"超时回收"判定——服务端按 STALE_MS=10min
+   * 超时回收 Agent，前端据此把"本轮消失 + lastSeen 过旧"的卡片标记为超时回收。 */
+  let lastSeenMap = new Map();
 
   /* ---------------- 启动 ---------------- */
   document.addEventListener('DOMContentLoaded', init);
@@ -193,6 +214,9 @@
     const agents = Array.isArray(data.agents) ? data.agents : [];
     renderFooter(data.updatedAt);
 
+    // 方向 B：更新 lastSeen 快照（agent id -> 时间戳），供超时回收判定使用
+    updateLastSeenMap(agents);
+
     // 无任何 Agent：展示空状态占位；同时清空旧卡片缓存与 DOM，
     // 避免服务端重启（agents 清空）后旧卡片残留、新事件到来时"复活"
     if (!agents.length) {
@@ -223,6 +247,10 @@
     const nowStatus = new Map(agents.map(function (a) {
       return [a.id, normalizeStatus(a.status)];
     }));
+
+    // 方向 B：超时回收可视化——在 renderActive 清理之前判定"超时回收"的卡片，
+    // 挂 .timeout-leaving 打盹淡出（agents 为空时 render 已提前返回，不会误判整体清空）
+    detectTimeoutRecycled(agents);
 
     renderMain(mainActive);
     renderActive(subActive, activeCards, els.activeGrid, nowStatus);
@@ -401,8 +429,9 @@
   /* 火柴人位置驱动：16ms 定时器逐帧插值，逐段 ease-in-out。
    * 不依赖 CSS transition / requestAnimationFrame（低帧率或节流环境下也稳定）。
    * path: [{ x, y, dur }, ...] 依次经过的路径点（首点为起点，dur 为到达该点的用时）；
-   * totalMs 结束后停止并移除火柴人。 */
-  function driveStickman(stick, path, totalMs) {
+   * totalMs 结束后停止并移除火柴人。
+   * onDone（可选）：火柴人从动画层移除后回调一次（方向 A：派发队列据此继续出队）。 */
+  function driveStickman(stick, path, totalMs, onDone) {
     const t0 = performance.now();
     // 滚动补偿（方案：滚动错位修复）：path 坐标是动画开始时一次性读取的
     // getBoundingClientRect 视口坐标，而火柴人容器是 fixed 定位。动画期间页面
@@ -465,6 +494,8 @@
     removeTimer = window.setTimeout(function () {
       cancel();
       if (stick.parentNode) stick.parentNode.removeChild(stick);
+      // 方向 A：火柴人移除后回调（派发队列据此继续出队下一个；backToMain 不传）
+      if (typeof onDone === 'function') onDone();
     }, totalMs + 100);
     if (typeof requestAnimationFrame === 'function') {
       rafId = requestAnimationFrame(step);
@@ -485,56 +516,54 @@
    * 两栏布局（跑道 ≥ 30px）时火柴人沿虚线方向直线过渡——从来源卡片右缘中心斜线
    * 走到目标卡片左缘中心，方向与 SVG 发散虚线一致（虚线也由主卡右缘中心 → 子卡
    * 左缘中心，火柴人只是起点/终点在卡片边缘 ±20px 内、y 相同 → 平行贴合虚线）；
-   * 窄屏单栏（两栏间距 < 30px）时同样退化为直线过渡。 */
+   * 窄屏单栏（两栏间距 < 30px）时同样退化为直线过渡。
+   * 方向 A（并发排队）：toSub 派发先入队串行执行（避免多个派发小人重叠跑），
+   * backToMain 汇报保持直接执行不排队（原有逻辑不变）。 */
   function runStickman(direction, agent, isFailed) {
     const layer = els.animLayer;
     if (!layer || !agent || agent.id === 'main') return;
     // 动效敏感用户：直接不创建火柴人（style.css 另有全局降级）
     if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
-    // 主 Agent 在左栏 main-grid、子 Agent 在右栏 active-grid，统一用 getCardElById 取卡片
-    // （main 未出现时返回 null，走 FALLBACK_MAIN_RECT 占位）
-    const fromEl = direction === 'toSub' ? getCardElById('main') : getCardElById(agent.id);
-    const toEl = direction === 'toSub' ? getCardElById(agent.id) : getCardElById('main');
-
-    let fromRect, toRect;
+    // 派发（toSub，方向 A）：先入队；若队列空闲立即启动 runQueuedToSub 出队执行，
+    // 否则等上一个火柴人的移除回调继续出队（串行排队，同一时刻至多 1 个派发小人）
     if (direction === 'toSub') {
-      if (!toEl) return; // 子 Agent 卡片还不存在（如首帧即 done/failed）→ 无法到达
-      fromRect = fromEl ? fromEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
-      toRect = toEl.getBoundingClientRect();
-    } else {
-      if (!fromEl) return; // 子 Agent 卡片已被移出 DOM → 无法出发
-      fromRect = fromEl.getBoundingClientRect();
-      toRect = toEl ? toEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
+      stickmanQueue.push(agent.id);
+      if (!stickmanBusy) runQueuedToSub();
+      return;
     }
 
+    /* ============ 汇报（backToMain）：直接执行不排队（原有逻辑保持不变） ============ */
+    const fromEl = getCardElById(agent.id);
+    const toEl = getCardElById('main');
+
+    let fromRect, toRect;
+    if (!fromEl) return; // 子 Agent 卡片已被移出 DOM → 无法出发
+    fromRect = fromEl.getBoundingClientRect();
+    toRect = toEl ? toEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
+
     // 创建火柴人：跑回来时镜像翻转（面向左）+ 手里拿着交接的文件（.doc 随 with-doc
-    // 显形；派发时同样持文件）。汇报表情按成败区分：done → .report（😄 + 绿勾）、
-    // failed → .failed（😢 不带绿勾），显隐规则见 style.css
+    // 显形）。汇报表情按成败区分：done → .report（😄 + 绿勾）、failed → .failed
+    // （😢 不带绿勾），显隐规则见 style.css
     const stick = document.createElement('div');
-    stick.className = 'stickman-runner' + (direction === 'backToMain'
-      ? ' flip with-doc' + (isFailed ? ' failed' : ' report')
-      : ' with-doc');
+    stick.className = 'stickman-runner flip with-doc' + (isFailed ? ' failed' : ' report');
     stick.innerHTML = STICKMAN_SVG;
     stick.style.transition = 'none'; // 位置由 JS 逐帧驱动，禁用 CSS 过渡
     layer.appendChild(stick);
 
     // 起点/终点：卡片边缘 ±20px 处（火柴人放大到 44px 宽后，半宽 22px≈20px，
     // 到达时身体中心大致对齐卡片边缘）、卡片垂直中心高度
-    const startX = direction === 'toSub' ? fromRect.right - 20 : fromRect.left + 20;
+    const startX = fromRect.left + 20;
     const startY = fromRect.top + fromRect.height / 2;
-    const endX = direction === 'toSub' ? toRect.left + 20 : toRect.right - 20;
+    const endX = toRect.right - 20;
     const endY = toRect.top + toRect.height / 2;
-    // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
-    const runway = direction === 'toSub'
-      ? toRect.left - fromRect.right
-      : fromRect.left - toRect.right;
+    // 两栏间距（来源卡片边缘 - 目标卡片边缘）；≥30px 视为两栏跑道可用
+    const runway = fromRect.left - toRect.right;
 
     let totalMs;
     if (runway >= 30) {
-      // 两栏布局：沿虚线方向直线过渡（派发 toSub 与汇报 backToMain 共用本路径）。
-      // 火柴人从来源卡片边缘中心斜线走到目标卡片边缘中心，方向与 SVG 发散虚线一致
-      // （虚线由主卡右缘中心 → 子卡左缘中心）；起点/终点均在卡片边缘 ±20px 内，
+      // 两栏布局：沿虚线方向直线过渡。火柴人从来源卡片边缘中心斜线走到目标卡片
+      // 边缘中心，方向与 SVG 发散虚线一致；起点/终点均在卡片边缘 ±20px 内，
       // 斜线全程位于两栏之间的跑道区域，不压卡片。总时长 = STICKMAN_TRAVEL_MS 5s
       totalMs = STICKMAN_TRAVEL_MS;
       driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
@@ -547,20 +576,89 @@
     // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
     spawnStickDust(stick, totalMs);
 
-    // 派发动画（toSub）到达终点：子 Agent 办公小人接住文件 + 送达闪光 + 放下文件。
-    // totalMs 时刻火柴人正好到达目标卡片边缘，此刻把文件"传递"给子卡小人
-    // （.has-file：手臂前伸 + 文件浮现），并落一个 📄 闪一下边框，短暂停留后移除，
-    // 让用户明确看到"任务送到了子 Agent"。
-    if (direction === 'toSub') {
-      // 到达定时器：派发小人已到达目标，执行送达效果
+    // 交接第三步：火柴人到达主 Agent → 主 Agent 办公小人接住文件 + 收/拒收闪光：
+    // done（成功）→ 绿色"收到" + 😄；failed（失败）→ 红色"驳回" + 😟
+    window.setTimeout(function () { mainReceiveFile(!isFailed); }, totalMs);
+  }
+
+  /* 派发火柴人串行执行器（方向 A）：队列空闲时由 runStickman 首次触发，火柴人移除
+   * 回调 / 卡片缺失跳过时继续触发，处理到队列为空为止。
+   * 兜底：队列累计长度异常（如 >20）时清空队列防卡死；任何异常不阻断轮询。 */
+  function runQueuedToSub() {
+    stickmanBusy = true;
+    // 兜底：队列累计长度异常（如 >20）时清空队列防卡死
+    if (stickmanQueue.length > 20) stickmanQueue.length = 0;
+    let id;
+    while (stickmanQueue.length > 0) {
+      id = stickmanQueue.shift();
+      // 存在则创建 toSub 火柴人并启动（由 driveStickman 移除回调继续出队）；
+      // 卡片已不存在则跳过，继续出队下一个
+      if (launchToSubStickman(id)) return;
+    }
+    // 队列已空（或全部卡片已消失）：复位忙碌标记
+    stickmanBusy = false;
+  }
+
+  /* 创建单个"派发"火柴人（方向 A）：从主 Agent 卡片跑向 id 对应子 Agent 卡片，
+   * 到达后播放送达效果（与 runStickman 原 toSub 分支逻辑一致）。
+   * 子 Agent 卡片已不存在（getCardElById 返回 null）时返回 false，由调用方跳过；
+   * 创建/驱动过程异常同样返回 false（兜底，不阻断轮询）。 */
+  function launchToSubStickman(id) {
+    const layer = els.animLayer;
+    const fromEl = getCardElById('main');
+    const toEl = getCardElById(id);
+    if (!toEl) return false; // 子 Agent 卡片已不存在（被回收/离场）→ 跳过本单
+    let launched = false;    // 火柴人是否已成功启动（后续异常不再并发启动下一个）
+    try {
+      const fromRect = fromEl ? fromEl.getBoundingClientRect() : FALLBACK_MAIN_RECT;
+      const toRect = toEl.getBoundingClientRect();
+
+      // 创建火柴人：派发样式（.with-doc 持文件，不镜像翻转）
+      const stick = document.createElement('div');
+      stick.className = 'stickman-runner with-doc';
+      stick.innerHTML = STICKMAN_SVG;
+      stick.style.transition = 'none'; // 位置由 JS 逐帧驱动，禁用 CSS 过渡
+      layer.appendChild(stick);
+
+      // 起点/终点：主卡右缘 -20px → 子卡左缘 +20px，卡片垂直中心高度
+      const startX = fromRect.right - 20;
+      const startY = fromRect.top + fromRect.height / 2;
+      const endX = toRect.left + 20;
+      const endY = toRect.top + toRect.height / 2;
+      // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
+      const runway = toRect.left - fromRect.right;
+
+      // 火柴人移除回调（方向 A）：标记队列空闲并继续出队下一个（若队列非空）
+      const onRemoved = function () {
+        stickmanBusy = false;
+        if (stickmanQueue.length > 0) runQueuedToSub();
+      };
+
+      let totalMs;
+      if (runway >= 30) {
+        // 两栏布局：沿虚线方向直线过渡（派发 toSub 路径，与 runStickman 原逻辑一致）
+        totalMs = STICKMAN_TRAVEL_MS;
+        driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, onRemoved);
+      } else {
+        // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s）
+        totalMs = STICKMAN_TRAVEL_MS;
+        driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, onRemoved);
+      }
+      launched = true; // 已启动：此后异常交由 onRemoved 收尾
+
+      // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
+      spawnStickDust(stick, totalMs);
+
+      // 派发动画到达终点：子 Agent 办公小人接住文件 + 送达闪光 + 放下文件。
+      // totalMs 时刻火柴人正好到达目标卡片边缘，此刻把文件"传递"给子卡小人。
+      // 到站回调基于 agent.id 找卡片：卡片已不存在则跳过送达效果（守卫保留）
       window.setTimeout(function () {
-        const el = getCardElById(agent.id);
+        const el = getCardElById(id);
         if (!el) return; // 卡片已被移除（如离场动画中）→ 跳过送达效果
         // 交接第一步：子 Agent 办公小人伸手接住文件
         setOfficeFile(el, true);
         el.classList.add('task-delivered');
-        // 表情切换（方案 C）：😟 已在派发时刻由 assignTaskFace 挂上（无需等火柴人到达），
-        // 到达时若卡片仍在派发窗口内继续持有，此处不再重复处理
+        // 表情切换（方案 C）：😟 已在派发时刻由 assignTaskFace 挂上（无需等火柴人到达）
         const drop = document.createElement('span');
         drop.className = 'task-drop';
         drop.textContent = '📄';
@@ -577,10 +675,15 @@
           setOfficeFile(el, false);
         }, 2500);
       }, totalMs);
-    } else if (direction === 'backToMain') {
-      // 交接第三步：火柴人到达主 Agent → 主 Agent 办公小人接住文件 + 收/拒收闪光：
-      // done（成功）→ 绿色"收到" + 😄；failed（失败）→ 红色"驳回" + 😟
-      window.setTimeout(function () { mainReceiveFile(!isFailed); }, totalMs);
+
+      return true;
+    } catch (err) {
+      // 兜底：任何异常不阻断轮询。
+      // 火柴人已启动（launched）→ 交给 onRemoved 收尾，不再并发启动下一个；
+      // 未启动 → 复位忙碌标记并返回 false，由队列继续下一个
+      if (launched) return true;
+      stickmanBusy = false;
+      return false;
     }
   }
 
@@ -783,6 +886,51 @@
   /* 主 Agent（左栏 main-grid） */
   function renderMain(mainActive) {
     renderActive(mainActive, mainCards, els.mainGrid);
+  }
+
+  /* 方向 B：更新 lastSeen 快照。服务端 lastSeen 为 ISO 字符串，用 Date.parse 转时间戳；
+   * 解析失败/缺失时记为当前时间（视为"刚活跃"，不参与超时判定，避免误判）。 */
+  function updateLastSeenMap(agents) {
+    agents.forEach(function (a) {
+      const t = Date.parse(a.lastSeen);
+      lastSeenMap.set(a.id, isNaN(t) ? Date.now() : t);
+    });
+  }
+
+  /* 方向 B：超时回收可视化。服务端按 config.mjs STALE_MS=10min 超时回收 Agent（从
+   * /api/state 移除）；前端遍历 lastSeenMap，对"本轮 agents 中不存在"且"lastSeen 距今
+   * 超过 STALE_FRONT_MS"的 id 判定为超时回收：卡片仍在 DOM 则挂 .timeout-leaving 类
+   * （复用 😴 打盹表情层 office-head-idle）并安排淡出移除（TIMEOUT_LEAVE_MS 后删 DOM）。
+   * 排除项：agents 为空（整体清空，render 已提前返回）；main 常驻不参与；
+   * done/failed 正常回收走现有 leaveCard/removeActiveCard，用 prevAgentMap 判断 prev
+   * 非 done/failed，避免误判为超时。任何异常不阻断轮询（try/catch 兜底）。 */
+  function detectTimeoutRecycled(agents) {
+    try {
+      const now = Date.now();
+      const currentIds = new Set(agents.map(function (a) { return a.id; }));
+      lastSeenMap.forEach(function (ts, id) {
+        if (id === 'main') return;                    // 主 Agent 常驻，不参与超时回收
+        if (currentIds.has(id)) return;               // 本轮仍存在 → 跳过
+        const prev = prevAgentMap.get(id);
+        if (prev === 'done' || prev === 'failed') return; // done/failed 正常回收不误判
+        if (!ts || !isFinite(ts) || now - ts <= STALE_FRONT_MS) return; // 未超时 → 跳过
+        // 判定为超时回收：卡片仍在 DOM 则挂 .timeout-leaving（😴 打盹）并安排淡出移除；
+        // 已在离场（is-leaving）/ 淡出移除（removing）中的卡片交由现有动画收尾
+        const el = getCardElById(id);
+        if (el && el.isConnected &&
+            !el.classList.contains('is-leaving') &&
+            !el.classList.contains('removing')) {
+          el.classList.add('timeout-leaving');
+          if (activeCards[id]) delete activeCards[id]; // 不再由 renderActive 清理（避免双重处理）
+          window.setTimeout(function () {
+            if (el.parentNode) el.parentNode.removeChild(el);
+          }, TIMEOUT_LEAVE_MS);
+        }
+        lastSeenMap.delete(id);                        // 已判定处理，移出跟踪
+      });
+    } catch (err) {
+      // 兜底：异常不阻断轮询
+    }
   }
 
   /* 子 Agent（右栏 active-grid）：list 为空时清理缓存中多余卡片。
