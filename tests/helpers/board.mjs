@@ -155,3 +155,29 @@ export async function setClassesAndReadEmoji(page, id, classes) {
     return emoji;
   }, classes).catch(() => null);
 }
+
+/* ---------- 方向 C/D 新增断言辅助（动画趣味化优化） ---------- */
+
+/** 工具屏快照：卡片 tool-type-* 类 + .screen-content 内各 .screen-* 子层计算 display。
+ * 用于"按当前工具显示对应屏幕层"（方向 C）的 CSS 级断言。
+ * 卡片不存在返回 null；screen[k]：'none'（隐藏）| 其它 display 值（可见）| 'missing'（元素缺失）。 */
+export async function toolScreenSnapshot(page, id) {
+  return page.$eval(`.agent-card[data-id="${id}"]`, (el) => {
+    const kinds = ["code", "search", "dispatch", "default"];
+    const screen = {};
+    kinds.forEach((k) => {
+      const node = el.querySelector(".screen-content .screen-" + k);
+      screen[k] = node ? getComputedStyle(node).display : "missing";
+    });
+    return {
+      classes: Array.from(el.classList),
+      hasScreenContent: !!el.querySelector(".screen-content"),
+      screen,
+    };
+  }).catch(() => null);
+}
+
+/** 动画层当前尘土粒子数（#anim-layer .stick-dust，方向 A）。 */
+export async function animDustCount(page) {
+  return page.$$eval("#anim-layer .stick-dust", (els) => els.length).catch(() => 0);
+}

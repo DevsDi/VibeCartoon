@@ -45,6 +45,9 @@ node tests/cleanup.mjs          # 手动清理测试注入行（自动跑时无�
 | `cases/06-success-regression.mjs` | 完整成功流程表情切换回归 | A-F |
 | `cases/07-reduced-motion.mjs` | reduced-motion 无火柴人/粒子，功能正常 | A/C 附属 |
 | `cases/08-emoji-exclusive.mjs` | 状态类叠加时仅一个表情可见（CSS 互斥） | B/C/D |
+| `cases/09-resurrect.mjs` | 同 id 复活不误删（离场中新卡不被旧定时器删除） | F |
+| `cases/10-tool-screen.mjs` | 按当前工具挂 tool-type-* 类并显隐对应 .screen-* 层 | 方向 C |
+| `cases/11-motion-addons.mjs` | 在途尘土>0/到达归零；done 卡 card-pop 短暂出现；#bg-symbols 14 span；空状态雷达/待机小人 | 方向 A/B/D |
 
 ## 二、测试报告模板
 

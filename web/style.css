@@ -52,6 +52,34 @@ body {
  * （页面左右留白由 .board-wrap 的 padding 负责，见第 7 节） */
 .wrap { width: 100%; max-width: none; padding: 0; }
 
+/* 背景氛围符号层（方向 D，由 app.js 生成）：全屏代码符号沿 bgDrift 自下而上缓慢漂移。
+ * 固定铺满全屏、z-index -1：位于 body 背景之上、内容之下，天然隔离不挡交互；
+ * 不设 top 属性，仅 inset:0 铺满。 */
+.bg-symbols {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+  color: var(--text);
+  opacity: 0.16;
+}
+
+.bg-symbols span {
+  position: absolute;
+  opacity: 0;
+  animation: bgDrift var(--dur, 18s) linear infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+@keyframes bgDrift {
+  0%   { transform: translateY(25vh); opacity: 0; }
+  12%  { opacity: 0.7; }
+  85%  { opacity: 0.4; }
+  100% { transform: translateY(-115vh); opacity: 0; }
+}
+
 /* 基础动画工具都用 CSS 变量传入颜色，避免重复定义 */
 
 /* ---------- 3. 断连横幅 ---------- */
@@ -160,6 +188,73 @@ body {
 }
 
 .empty-sub { font-size: 14px; color: var(--muted-2); }
+
+/* ---------- 6b. 空状态场景（方向 D）：雷达扫描 + 待机小人 ---------- */
+/* 与 🧊 浮动图标（.empty-icon）共存：图标浮动、下方雷达与小人展示"待机值守"感 */
+.empty-scene {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto 18px;
+}
+
+/* 雷达：圆形边框 + conic-gradient 扫描扇 + 同心 radial-gradient 环，整体旋转 */
+.empty-radar {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background:
+    radial-gradient(circle, transparent 52%, rgba(56, 189, 248, 0.06) 54%, transparent 58%),
+    radial-gradient(circle, transparent 30%, rgba(56, 189, 248, 0.06) 31%, transparent 36%),
+    conic-gradient(from 0deg, rgba(56, 189, 248, 0.25), transparent 25%);
+  animation: radarSpin 3.5s linear infinite;
+}
+
+@keyframes radarSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* 扩张 ping 环：雷达向外扩散 + opacity 消散（:after 错开半周期） */
+.empty-radar::before,
+.empty-radar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  animation: radarPing 2.8s ease-out infinite;
+}
+
+.empty-radar::after { animation-delay: 1.4s; }
+
+@keyframes radarPing {
+  0%   { transform: scale(0.85); opacity: 0.8; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+/* 待机小人：绝对定位居中于场景底部，上下 1-2px 呼吸浮动 + 小阴影。
+ * 结构见 index.html 的 .empty-stick（仿 STICKMAN_SVG 画法，线条跟随 currentColor）。
+ * 注意 keyframes 需保留 translateX(-50%) 的水平居中 */
+.empty-stick {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 46px;
+  height: 61px;
+  color: var(--muted);
+  filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.35));
+  animation: standIdle 3s ease-in-out infinite;
+}
+
+.empty-stick text {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+
+@keyframes standIdle {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50%      { transform: translateX(-50%) translateY(-2px); }
+}
 
 /* ---------- 7. 看板主区与卡片网格 ---------- */
 /* 看板主区：左主 Agent + 右子 Agent 两栏，整体水平居中（max-width 1440px）：
@@ -305,6 +400,21 @@ body {
 @keyframes cardFlash {
   0%   { box-shadow: 0 0 0 0 rgba(var(--sc-rgb), 0.55); border-color: var(--sc); }
   100% { box-shadow: 0 0 0 20px rgba(var(--sc-rgb), 0); }
+}
+
+/* 完成弹出反馈（B 方向，由 JS popCard 加挂）：完成瞬间卡片轻微放大 + 绿色外扩光环。
+ * 用独立 --pop-rgb 变量（默认取 done 绿）驱动光环色，避免污染状态色 --sc；
+ * 与入场动画 .enter 互斥（JS 侧有 guard），transform 缩放不影响 .flip 火柴人 */
+.agent-card.card-pop {
+  --pop-rgb: var(--done-rgb);
+  animation: cardPop 0.55s ease 1;
+}
+
+@keyframes cardPop {
+  0%   { transform: scale(1);        box-shadow: 0 0 0 0 rgba(var(--pop-rgb), 0.5); }
+  35%  { transform: scale(1.045);    box-shadow: 0 0 0 0 rgba(var(--pop-rgb), 0.5); }
+  60%  { transform: scale(0.985); }
+  100% { transform: scale(1);        box-shadow: 0 0 0 26px rgba(var(--pop-rgb), 0); }
 }
 
 /* 从活动网格移除时：淡出缩小 */
@@ -681,6 +791,25 @@ body {
   50%      { opacity: 0.55; }
 }
 
+/* 电脑屏幕内容层（方向 C）：按工具关联动作类型切换屏幕显示的内容。
+ * 结构见 app.js OFFICE_SVG 的 .screen-content（4 个子层：代码行 / 🔍 / 📨 / 🛠）。
+ * 4 层默认全部隐藏，由 app.js 按 toolTypeOf() 给卡片挂 tool-type-XXX 类显示其一。
+ * 仿表情层套路：:not(.is-leaving) 排除拜拜离场卡、:not(.has-file) 排除交接持文件场景。
+ * emoji 层复用系统彩色 emoji 字体（与 office-head 一致），彩色字形 stroke 无效，仅显隐切换。 */
+.screen-code,
+.screen-search,
+.screen-dispatch,
+.screen-default { display: none; }
+
+.screen-content text {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+
+.agent-card.tool-type-code:not(.is-leaving) .office-scene:not(.has-file) .screen-code { display: block; }
+.agent-card.tool-type-search:not(.is-leaving) .office-scene:not(.has-file) .screen-search { display: block; }
+.agent-card.tool-type-dispatch:not(.is-leaving) .office-scene:not(.has-file) .screen-dispatch { display: block; }
+.agent-card.tool-type-default:not(.is-leaving) .office-scene:not(.has-file) .screen-default { display: block; }
+
 /* queued：坐着等待，整个场景变暗 */
 .agent-card.status-queued .office-scene { opacity: 0.55; }
 
@@ -833,6 +962,25 @@ body {
 
 /* 汇报：带回的绿色勾标 */
 .stickman-runner.report .report-mark { opacity: 1; }
+
+/* 脚底尘土（A 方向，由 JS spawnStickDust 生成）：跑动时脚下迸出小土点，
+ * 沿 --dx/--dy 随机轨迹上浮 + 淡出，写法仿 celebrate-particle。
+ * 颜色复用火柴人本色（#ffd54f，stickman-runner 的 color）。 */
+.stick-dust {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 213, 79, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  animation: dustPuff 0.7s ease-out forwards;
+}
+
+@keyframes dustPuff {
+  0%   { opacity: 0.55; transform: translate(0, 0) scale(0.6); }
+  100% { opacity: 0;    transform: translate(var(--dx), var(--dy)) scale(1); }
+}
 
 /* ---------- 10d. 派发可见性：新任务标记 / 送达闪光 / 放下文件 ---------- */
 /* 新子 Agent 出现时 JS 在 type-badge 旁插入 .new-task-tag（闪烁 3 次，约 2.2s 后移除） */
@@ -1099,4 +1247,7 @@ body {
   .stickman .leg-left,
   .stickman .leg-right { animation: none; }
   .pc-screen-glow { animation: none !important; }
+  .stick-dust, .card-pop { animation: none !important; }
+  /* 背景符号 / 空状态雷达与待机小人（方向 C+D）：停用动画并大幅减淡 */
+  .bg-symbols span, .empty-radar, .empty-radar::before, .empty-radar::after, .empty-stick { animation: none !important; opacity: 0.05; }
 }

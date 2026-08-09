@@ -33,6 +33,15 @@
     unknown:  { emoji: '🌀', label: '未知状态' }
   };
 
+  /* 工具名 → 关联动作类型（方向 C）：按工具类型切换卡片电脑屏幕上的内容
+   * code（写代码）→ 代码行；search（搜索）→ 🔍；dispatch（派发）→ 📨；
+   * 未命中的工具 → 'default'（🛠）。由 toolTypeOf() 匹配，见工具函数区。 */
+  const TOOL_TYPE_MAP = {
+    code: ['read', 'edit', 'write'],
+    search: ['grep', 'glob', 'search'],
+    dispatch: ['agent', 'sendmessage']
+  };
+
   /* 折叠到"底部紧凑列表"的状态：子 Agent 完成/失败后不再进折叠区，
    * 而是播放"拜拜"（挥手 + 淡出）动画后消失（见 leaveCard） */
   const FOLDED_STATUS = { done: true, failed: true };
@@ -50,6 +59,24 @@
    * 方案 D：done 子卡的挥手拜拜等待窗口 = 庆祝 + 火柴人到达，
    * 使"主 Agent 接住文件"与"子卡挥手告别"同屏。 */
   const STICKMAN_TRAVEL_MS = 5000;
+
+  /* 火柴人奔跑质感（A 方向）：
+   * - 弹跳：STICKMAN_BOUNCE_MS 为一个完整上下周期，振幅 STICKMAN_BOUNCE_AMP（px）；
+   *   STICKMAN_BOUNCE_RAMP 为 totalMs 前/后的渐入渐出比例（0.08 = 前/后 8%）。
+   * - 脚底尘土：跑动时每 STICK_DUST_EVERY_MS 生成一颗尘土，STICK_DUST_LIFE_MS 后消失。 */
+  const STICKMAN_BOUNCE_MS = 600;
+  const STICKMAN_BOUNCE_AMP = 2;
+  const STICKMAN_BOUNCE_RAMP = { start: 0.08, end: 0.08 };
+  const STICK_DUST_EVERY_MS = 120;
+  const STICK_DUST_LIFE_MS = 700;
+
+  /* 完成反馈增强（B 方向）：.card-pop 弹出动画时长（毫秒），结束后移除类名 */
+  const CARD_POP_MS = 620;
+
+  /* 背景氛围符号（方向 D）：全屏缓慢漂移的代码符号，取前 BG_SYMBOL_COUNT 个生成
+   * .bg-symbols 层（每个符号随机位置 / 字号 / 时长 / 延迟，见 init()） */
+  const BG_SYMBOLS = ['<', '>', '{', '}', '/', ';', ':', '=', '#', '*', '_', '[', ']', '(', ')'];
+  const BG_SYMBOL_COUNT = 14;
 
   /* 卡片移除动画时长（毫秒）：.removing 淡出过渡 */
   const REMOVE_ANIM_MS = 420;
@@ -94,6 +121,23 @@
     els.animLayer.className = 'anim-layer';
     els.animLayer.setAttribute('aria-hidden', 'true');
     document.body.appendChild(els.animLayer);
+
+    // 背景氛围符号层（方向 D）：全屏代码符号缓慢漂移，挂在 body 末尾。
+    // 每个符号随机：水平 left% / 垂直 top% / 字号 10-20px / --dur(12-24s) / --delay(0-20s)
+    els.bgSymbols = document.createElement('div');
+    els.bgSymbols.className = 'bg-symbols';
+    els.bgSymbols.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < BG_SYMBOL_COUNT; i++) {
+      const sp = document.createElement('span');
+      sp.textContent = BG_SYMBOLS[i % BG_SYMBOLS.length];
+      sp.style.left = (Math.random() * 100).toFixed(1) + '%';
+      sp.style.top = (Math.random() * 100).toFixed(1) + '%';
+      sp.style.fontSize = (10 + Math.random() * 10).toFixed(1) + 'px';
+      sp.style.setProperty('--dur', (12 + Math.random() * 12).toFixed(1) + 's');
+      sp.style.setProperty('--delay', (Math.random() * 20).toFixed(1) + 's');
+      els.bgSymbols.appendChild(sp);
+    }
+    document.body.appendChild(els.bgSymbols);
 
     // 初始空状态
     setEmptyVisible(true);
@@ -296,6 +340,9 @@
         // 失败不庆祝（走 .task-failed 失败视觉，不再是"保留 ❌ 抖动"）；
         // 动效敏感用户跳过庆祝与延时
         if (isDone && !isReduced) celebrateCard(a.id);
+        // 完成反馈增强（B 方向）：完成瞬间给卡片一个"弹出"缩放反馈
+        // （celebrateCard 之后执行，避免与粒子动画同帧叠加；cardEl 已在分支顶部取得）
+        if (isDone) popCard(cardEl);
         // 火柴人跑回汇报：done → 😄 + 带回绿勾；failed → 😢 不带绿勾（第三参 isFailed）。
         // 若该 agent 仍有在途派发小人（inFlightToSub），掉头小人已负责"返回"，
         // 跳过 backToMain，避免两个小人同时跑回主 Agent 造成视觉重复
@@ -315,6 +362,40 @@
   /* 缓动：ease-in-out（二次贝塞尔近似） */
   function easeInOut(p) {
     return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+  }
+
+  /* 缓动：ease-in（起步加速，二次） */
+  function easeIn(p) {
+    return p * p;
+  }
+
+  /* 缓动：ease-out（到站减速，二次） */
+  function easeOut(p) {
+    return 1 - Math.pow(1 - p, 2);
+  }
+
+  /* 火柴人三段式路径：起步加速（easeIn）→ 巡航（easeInOut）→ 到站减速（easeOut）。
+   * 中间点取直线 10% / 90% 处，三段时长 10% / 80% / 10%，总时长精确等于 totalMs，
+   * 起点终点精确落在 from / to；终点段挂 easeOut 保证到站减速落地。 */
+  function buildRunPath(from, to, totalMs) {
+    const d10 = totalMs * 0.10;
+    const d80 = totalMs * 0.80;
+    return [
+      { x: from.x, y: from.y, dur: 0 },
+      {
+        x: from.x + (to.x - from.x) * 0.10,
+        y: from.y + (to.y - from.y) * 0.10,
+        dur: d10,
+        ease: easeIn
+      },
+      {
+        x: from.x + (to.x - from.x) * 0.90,
+        y: from.y + (to.y - from.y) * 0.90,
+        dur: d80,
+        ease: easeInOut
+      },
+      { x: to.x, y: to.y, dur: d10, ease: easeOut }
+    ];
   }
 
   /* 火柴人位置驱动：16ms 定时器逐帧插值，逐段 ease-in-out。
@@ -340,6 +421,16 @@
       if (removeTimer) { window.clearTimeout(removeTimer); removeTimer = null; }
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     };
+    /* 弹跳包络：totalMs 前/后 8%（STICKMAN_BOUNCE_RAMP）用 smoothstep 渐入渐出
+     * 归零（保证起终点精确落地、不叠卡片），中段返回 1（全幅弹跳）。 */
+    const envelope = function (t) {
+      const startEnd = STICKMAN_BOUNCE_RAMP.start * totalMs;
+      const endStart = totalMs * (1 - STICKMAN_BOUNCE_RAMP.end);
+      const sm = function (u) { return u * u * (3 - 2 * u); }; // smoothstep
+      if (startEnd > 0 && t < startEnd) return sm(t / startEnd);
+      if (totalMs - endStart > 0 && t > endStart) return sm((totalMs - t) / (totalMs - endStart));
+      return 1;
+    };
     const step = function (now) {
       const t = Math.min(now - t0, totalMs);
       // 定位当前所在路径段
@@ -350,6 +441,7 @@
         acc += path[i + 1].dur;
       }
       if (seg === -1) {
+        // 终态（超出总时长兜底）：精确落地，不叠加弹跳
         const last = path[path.length - 1];
         stick.style.left = last.x + 'px';
         stick.style.top = (last.y + scrollDelta()) + 'px';
@@ -357,9 +449,13 @@
       }
       const from = path[seg];
       const to = path[seg + 1];
-      const p = to.dur > 0 ? easeInOut(Math.max(0, Math.min(1, (t - acc) / to.dur))) : 1;
+      // 逐段缓动：路径点可携带 ease（buildRunPath 三段变速），缺省回退 easeInOut
+      const p = to.dur > 0 ? (to.ease || easeInOut)(Math.max(0, Math.min(1, (t - acc) / to.dur))) : 1;
+      const baseTop = from.y + (to.y - from.y) * p + scrollDelta();
+      // 弹跳：跑动中脚部离地（负方向 = 向上），振幅受包络约束（起终点无弹跳）
+      const bounce = -Math.abs(Math.sin(t / STICKMAN_BOUNCE_MS * Math.PI * 2)) * STICKMAN_BOUNCE_AMP * envelope(t);
       stick.style.left = (from.x + (to.x - from.x) * p) + 'px';
-      stick.style.top = (from.y + (to.y - from.y) * p + scrollDelta()) + 'px';
+      stick.style.top = (baseTop + bounce) + 'px';
       if (t < totalMs) {
         rafId = requestAnimationFrame(step);
       }
@@ -441,18 +537,15 @@
       // （虚线由主卡右缘中心 → 子卡左缘中心）；起点/终点均在卡片边缘 ±20px 内，
       // 斜线全程位于两栏之间的跑道区域，不压卡片。总时长 = STICKMAN_TRAVEL_MS 5s
       totalMs = STICKMAN_TRAVEL_MS;
-      driveStickman(stick, [
-        { x: startX, y: startY, dur: 0 },
-        { x: endX,   y: endY,   dur: totalMs }
-      ], totalMs);
+      driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
     } else {
       // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s，与两栏节奏接近）
       totalMs = STICKMAN_TRAVEL_MS;
-      driveStickman(stick, [
-        { x: startX, y: startY, dur: 0 },
-        { x: endX,   y: endY,   dur: totalMs }
-      ], totalMs);
+      driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
     }
+
+    // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
+    spawnStickDust(stick, totalMs);
 
     // 派发动画（toSub）到达终点：子 Agent 办公小人接住文件 + 送达闪光 + 放下文件。
     // totalMs 时刻火柴人正好到达目标卡片边缘，此刻把文件"传递"给子卡小人
@@ -489,6 +582,31 @@
       // done（成功）→ 绿色"收到" + 😄；failed（失败）→ 红色"驳回" + 😟
       window.setTimeout(function () { mainReceiveFile(!isFailed); }, totalMs);
     }
+  }
+
+  /* 脚底尘土（A 方向）：跑动期间每 STICK_DUST_EVERY_MS 在火柴人脚下生成一颗尘土
+   * 圆点，沿 --dx/--dy 随机轨迹上浮淡出（CSS dustPuff，仿 celebrate-particle），
+   * STICK_DUST_LIFE_MS 后移除元素；totalMs+100 时停止生成（与火柴人移除同步）。
+   * 出生点：stick 左缘 +22（身体中心）、top +54（脚底），加小幅水平抖动避免成直线。
+   * stick 可能中途被移除（目标卡片消失），parentNode 守卫直接停表。 */
+  function spawnStickDust(stick, totalMs) {
+    const timer = window.setInterval(function () {
+      if (!stick.parentNode) { window.clearInterval(timer); return; }
+      const left = parseFloat(stick.style.left);
+      const top = parseFloat(stick.style.top);
+      if (!isFinite(left) || !isFinite(top) || !els.animLayer) return; // 首帧坐标未写入前跳过
+      const dust = document.createElement('span');
+      dust.className = 'stick-dust';
+      dust.style.left = (left + 22 + (Math.random() * 8 - 4)) + 'px';
+      dust.style.top = (top + 54) + 'px';
+      dust.style.setProperty('--dx', (Math.random() * 16 - 8).toFixed(0) + 'px');
+      dust.style.setProperty('--dy', (Math.random() * 8 + 6).toFixed(0) + 'px');
+      els.animLayer.appendChild(dust);
+      window.setTimeout(function () {
+        if (dust.parentNode) dust.parentNode.removeChild(dust);
+      }, STICK_DUST_LIFE_MS);
+    }, STICK_DUST_EVERY_MS);
+    window.setTimeout(function () { window.clearInterval(timer); }, totalMs + 100);
   }
 
   /* 任务交接：给卡片办公小人加/去"手持文件"状态。
@@ -574,6 +692,17 @@
         if (sp.parentNode) sp.parentNode.removeChild(sp);
       });
     }, CELEBRATE_MS + 500);
+  }
+
+  /* 完成反馈增强（B 方向）：完成瞬间给卡片加 .card-pop（CSS 弹出动画，见 style.css）。
+   * 卡片仍处于入场动画（.enter，约 1.7s）时跳过，避免入场动画被覆盖；
+   * CARD_POP_MS 后移除类名，供下次重复使用。 */
+  function popCard(el) {
+    if (!el || el.classList.contains('enter')) return;
+    el.classList.add('card-pop');
+    window.setTimeout(function () {
+      if (el.classList) el.classList.remove('card-pop');
+    }, CARD_POP_MS);
   }
 
   /* 新子 Agent 卡片顶部闪烁"新任务"标记（C 方案）：
@@ -751,6 +880,7 @@
     const rec = {
       el: el,
       status: null,
+      toolType: null,           // 方向 C：工具关联动作类型（'code'/'search'/'dispatch'/'default'/''），缓存比较避免重复操作 classList
       elapsedText: '',
       toolsText: '',
       toolsKey: null,           // 初始 null（非空串）：空工具列表也要触发首次"暂无工具"渲染
@@ -797,6 +927,16 @@
       flashCard(rec);
     }
 
+    // 1b) 工具关联动作分类（方向 C）：tool 状态按当前工具名计算分类，
+    //     给卡片挂/移除 tool-type-XXX 类（驱动屏幕内容切换，见 style.css）；
+    //     非 tool 状态清空分类并移除旧类。rec.toolType 缓存避免重复操作 classList
+    const toolType = status === 'tool' ? toolTypeOf(toolNameFor(agent)) : '';
+    if (rec.toolType !== toolType) {
+      if (rec.toolType) el.classList.remove('tool-type-' + rec.toolType);
+      rec.toolType = toolType;
+      if (toolType) el.classList.add('tool-type-' + toolType);
+    }
+
     // 2) 已用时长
     const elapsedText = formatElapsed(agent.startTime);
     if (rec.elapsedText !== elapsedText) {
@@ -837,6 +977,20 @@
       // 电脑屏幕（暗底 + 可动画的发光层）
       '<rect class="pc-screen" x="28" y="22" width="34" height="24" rx="3" fill="currentColor" opacity="0.15"></rect>' +
       '<rect class="pc-screen-glow" x="31" y="25" width="28" height="18" rx="2" fill="currentColor" opacity="0"></rect>' +
+      // 屏幕内容层（方向 C）：按工具关联动作类型切换（tool-type-XXX 类驱动显隐，
+      // 见 style.css）。4 个子层默认全部隐藏，28×18 屏幕视口内绘制、复用 currentColor：
+      // - screen-code：3 条细矩形模拟代码行；
+      // - screen-search / screen-dispatch / screen-default：🔍 / 📨 / 🛠 图标
+      '<g class="screen-content">' +
+        '<g class="screen-code">' +
+          '<rect x="33" y="27" width="15" height="2" rx="1" fill="currentColor" opacity="0.9"></rect>' +
+          '<rect x="33" y="31" width="10" height="2" rx="1" fill="currentColor" opacity="0.55"></rect>' +
+          '<rect x="33" y="35" width="17" height="2" rx="1" fill="currentColor" opacity="0.75"></rect>' +
+        '</g>' +
+        '<text class="screen-search" x="45" y="39" text-anchor="middle" font-size="8">🔍</text>' +
+        '<text class="screen-dispatch" x="45" y="39" text-anchor="middle" font-size="8">📨</text>' +
+        '<text class="screen-default" x="45" y="39" text-anchor="middle" font-size="8">🛠</text>' +
+      '</g>' +
       // 电脑底座
       '<rect x="38" y="46" width="14" height="3" fill="currentColor" opacity="0.3"></rect>' +
       // 坐姿小人（头 + 身体 + 手臂伸向键盘）
@@ -1004,6 +1158,18 @@
   function stripToolPrefix(value) {
     const m = String(value).match(/^tool:(.+)$/i);
     return m ? m[1].trim() : String(value);
+  }
+
+  /* 工具名 → 关联动作类型（方向 C）：先去 tool: 前缀并小写，再按 TOOL_TYPE_MAP
+   * 逐类匹配，命中返回 'code' / 'search' / 'dispatch'，否则返回 'default'。
+   * 由 updateCard 用于挂 tool-type-XXX 类，切换卡片电脑屏幕内容。 */
+  function toolTypeOf(name) {
+    const clean = stripToolPrefix(name).toLowerCase();
+    for (const type in TOOL_TYPE_MAP) {
+      if (Object.prototype.hasOwnProperty.call(TOOL_TYPE_MAP, type) &&
+          TOOL_TYPE_MAP[type].indexOf(clean) !== -1) return type;
+    }
+    return 'default';
   }
 
   /* 已用时长：mm:ss，超过 1 小时显示 h:mm:ss */
