@@ -61,7 +61,7 @@
   /* 子 Agent 完成（done）庆祝时长：粒子散开播放完，才进入挥手拜拜 */
   const CELEBRATE_MS = 1800;
 
-  /* 火柴人单程跑动耗时（毫秒）：两栏三段式 1.8+2.4+0.8s = 5s，窄屏单栏直线同为 5s。
+  /* 火柴人单程跑动耗时（毫秒）：两栏三段式 0.5+4.0+0.5s = 5s。
    * 方案 D：done 子卡的挥手拜拜等待窗口 = 庆祝 + 火柴人到达，
    * 使"主 Agent 接住文件"与"子卡挥手告别"同屏。 */
   const STICKMAN_TRAVEL_MS = 5000;
@@ -791,9 +791,11 @@
     // 途中目标消失则由 cancel() 一并清除（防止继续插值 / 重复回调）
     let rafId = null;
     let removeTimer = null;
+    let fallbackTimer = null; // rAF 不可用时的 setInterval 降级定时器（纳入 cancel 统一清理）
     const cancel = function () {
       if (removeTimer) { window.clearTimeout(removeTimer); removeTimer = null; }
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      if (fallbackTimer) { window.clearInterval(fallbackTimer); fallbackTimer = null; }
     };
     /* 弹跳包络：totalMs 前/后 8%（STICKMAN_BOUNCE_RAMP）用 smoothstep 渐入渐出
      * 归零（保证起终点精确落地、不叠卡片），中段返回 1（全幅弹跳）。 */
@@ -862,11 +864,13 @@
     if (typeof requestAnimationFrame === 'function') {
       rafId = requestAnimationFrame(step);
     } else {
-      // 降级：requestAnimationFrame 不可用时使用 setInterval
-      const timer = window.setInterval(function () {
+      // 降级：requestAnimationFrame 不可用时使用 setInterval。
+      // 定时器提升为函数级变量（fallbackTimer），纳入 cancel() 清理：
+      // 中途目标消失 cancel() 时一并 clearInterval，防止漏停持续插值
+      fallbackTimer = window.setInterval(function () {
         step(performance.now());
       }, 16);
-      window.setTimeout(function () { window.clearInterval(timer); }, totalMs + 100);
+      window.setTimeout(function () { if (fallbackTimer) window.clearInterval(fallbackTimer); }, totalMs + 100);
       step(performance.now());
     }
   }
@@ -924,7 +928,7 @@
     const endX = toRect.right - 20;
     const endY = toRect.top + toRect.height / 2;
 
-    // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥80px ≥30px）：火柴人沿跑道
+    // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥100px）：火柴人沿跑道
     // 直线过渡，总时长 = STICKMAN_TRAVEL_MS 5s。（旧 <30px 窄屏单列 else 分支为
     // 死代码——布局始终三列，已删除；窄屏溢出由 style.css 横向滚动兜底）
     const totalMs = STICKMAN_TRAVEL_MS;
@@ -999,7 +1003,7 @@
         if (stickmanQueue.length > 0) runQueuedToSub();
       };
 
-      // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥80px ≥30px）：火柴人沿跑道
+      // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥100px）：火柴人沿跑道
       // 直线过渡，总时长 = STICKMAN_TRAVEL_MS 5s。（旧 <30px 窄屏单列 else 分支为
       // 死代码——布局始终三列，已删除；窄屏溢出由 style.css 横向滚动兜底）
       const totalMs = STICKMAN_TRAVEL_MS;

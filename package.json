@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server/server.mjs",
     "test:unit": "node tests/collect-unit.mjs",
-    "test:cleanup": "node tests/cleanup.mjs"
+    "test:cleanup": "node tests/cleanup.mjs",
+    "test:e2e": "node tests/clear-e2e.mjs"
   }
 }

@@ -543,6 +543,99 @@ suite("值级脱敏：Slack xoxa / xoxp / xoxr / xoxs 前缀 token → [REDACTED
 });
 
 // ---------------------------------------------------------------------------
+// 15) tok 字段：直接取值 / total_tokens / usage 子对象三条路径 + 优先级
+//    （对应 collect.mjs buildLine 中 tok 的三级取值，此前 22 个用例零覆盖）
+// ---------------------------------------------------------------------------
+suite("tok 直接取值：payload.tok 优先于 total_tokens 与 usage", () => {
+  const r = runCollect(JSON.stringify({
+    hook: "SubagentStop",
+    agent_id: "e2e-tok-direct",
+    status: "success",
+    tok: 111,
+    total_tokens: 222,
+    usage: { total_tokens: 333 },
+    prompt: "tok 直接取值测试", // 非抽取字段，保证 detail 非空便于断言
+  }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.tok, 111, "payload.tok 应直接作为 tok，且优先于 total_tokens/usage");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("tok" in d), "tok 已被抽取，不应重复进入 detail");
+  assert.ok(!("total_tokens" in d), "total_tokens 已被抽取，不应重复进入 detail");
+  assert.ok(!("usage" in d), "usage 已被抽取，不应重复进入 detail");
+});
+
+suite("tok 兜底：payload.total_tokens 路径（字符串值转 Number）", () => {
+  const r = runCollect(JSON.stringify({
+    hook: "SubagentStop",
+    agent_id: "e2e-tok-total",
+    total_tokens: "456",            // 字符串值，最终应 Number 转换为 456
+    usage: { total_tokens: 789 },   // 有 usage 也不应覆盖 total_tokens（优先级更低）
+  }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.tok, 456, "total_tokens 应作为 tok 且 Number 转换为数字 456");
+});
+
+suite("tok 兜底：usage 子对象路径（total → output → input 依次回退）", () => {
+  // usage.total_tokens 命中
+  const r1 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-tok-u-t", usage: { total_tokens: 789 } }));
+  assert.strictEqual(r1.code, 0, `exit 应为 0，实为 ${r1.code}`);
+  assert.strictEqual(r1.line.tok, 789, "usage.total_tokens 应作为 tok");
+
+  // usage 无 total_tokens → 回退 output_tokens
+  const r2 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-tok-u-o", usage: { output_tokens: 555 } }));
+  assert.strictEqual(r2.code, 0, `exit 应为 0，实为 ${r2.code}`);
+  assert.strictEqual(r2.line.tok, 555, "无 total_tokens 时应回退 usage.output_tokens");
+
+  // usage 仅 input_tokens → 回退 input_tokens
+  const r3 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-tok-u-i", usage: { input_tokens: 666 } }));
+  assert.strictEqual(r3.code, 0, `exit 应为 0，实为 ${r3.code}`);
+  assert.strictEqual(r3.line.tok, 666, "无 total/output_tokens 时应回退 usage.input_tokens");
+
+  // 三条路径均缺失 → tok 为 null
+  const r4 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-tok-none" }));
+  assert.strictEqual(r4.code, 0, `exit 应为 0，实为 ${r4.code}`);
+  assert.strictEqual(r4.line.tok, null, "tok / total_tokens / usage 均缺失时应为 null");
+});
+
+// ---------------------------------------------------------------------------
+// 16) 错误状态推断：status 为 null 时的四种结构化失败信号
+//    （对应 collect.mjs buildLine 中 status == null 时的 error 推断分支）
+// ---------------------------------------------------------------------------
+suite("错误状态推断：status 为 null 时按结构化失败信号推断为 error", () => {
+  // success === false
+  const r1 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-false", success: false }));
+  assert.strictEqual(r1.code, 0, `exit 应为 0，实为 ${r1.code}`);
+  assert.strictEqual(r1.line.status, "error", "success === false 且无显式 status 应推断为 error");
+
+  // 顶层 error 字段
+  const r2 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-top", error: "调用超时" }));
+  assert.strictEqual(r2.code, 0, `exit 应为 0，实为 ${r2.code}`);
+  assert.strictEqual(r2.line.status, "error", "存在顶层 error 字段应推断为 error");
+
+  // result.error 嵌套
+  const r3 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-result", result: { error: "内部错误" } }));
+  assert.strictEqual(r3.code, 0, `exit 应为 0，实为 ${r3.code}`);
+  assert.strictEqual(r3.line.status, "error", "result.error 存在应推断为 error");
+
+  // subagent_stop.error 嵌套
+  const r4 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-sub", subagent_stop: { error: "失败" } }));
+  assert.strictEqual(r4.code, 0, `exit 应为 0，实为 ${r4.code}`);
+  assert.strictEqual(r4.line.status, "error", "subagent_stop.error 存在应推断为 error");
+
+  // 误判防护：success === true 且无失败信号 → 不得推断为 error
+  const r5 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-ok", success: true }));
+  assert.strictEqual(r5.code, 0, `exit 应为 0，实为 ${r5.code}`);
+  assert.strictEqual(r5.line.status, null, "success === true 且无失败信号不应推断为 error");
+
+  // 显式 status 优先：即使带 error 字段，显式 status 不被覆盖
+  const r6 = runCollect(JSON.stringify({ hook: "SubagentStop", agent_id: "e2e-err-explicit", status: "success", error: "不应覆盖" }));
+  assert.strictEqual(r6.code, 0, `exit 应为 0，实为 ${r6.code}`);
+  assert.strictEqual(r6.line.status, "success", "显式 status 存在时不被 error 字段覆盖");
+});
+
+// ---------------------------------------------------------------------------
 // 结果汇总
 // ---------------------------------------------------------------------------
 console.log("================ vc-dashboard collect 单元测试 ================");

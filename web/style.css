@@ -1022,7 +1022,7 @@ body {
   position: absolute;
   width: 44px;
   height: 58px;
-  transition: left 1s ease-in-out, top 1s ease-in-out;
+  /* 位置由 JS 逐帧驱动（app.js 强制 transition: none），故此处不设 transition */
   color: #ffd54f;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
   will-change: left, top;

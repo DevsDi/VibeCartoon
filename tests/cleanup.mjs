@@ -12,7 +12,7 @@
 //
 // 用法：node tests/cleanup.mjs
 
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile, writeFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,8 +45,17 @@ export async function cleanupInjectedEvents() {
   }
   if (removed === 0) return { removed: 0, kept: kept.length };
   const tmp = EVENTS_FILE + ".cleanup.tmp";
-  await writeFile(tmp, kept.join("\n") + "\n", "utf8");
-  await rename(tmp, EVENTS_FILE);
+  let renamed = false;
+  try {
+    await writeFile(tmp, kept.join("\n") + "\n", "utf8");
+    await rename(tmp, EVENTS_FILE);
+    renamed = true;
+  } finally {
+    // rename（或 writeFile）失败时清理残留的临时文件，避免 tmp 文件堆积在 data/ 下
+    if (!renamed) {
+      try { await unlink(tmp); } catch { /* tmp 未生成或已被清理，静默忽略 */ }
+    }
+  }
   return { removed, kept: kept.length };
 }
 
