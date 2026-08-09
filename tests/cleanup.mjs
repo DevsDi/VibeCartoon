@@ -22,7 +22,15 @@ export const EVENTS_FILE = path.join(ROOT, "data", "events.jsonl");
 
 /** 过滤掉 agent id 以 e2e- 开头的行，返回 { removed, kept }。 */
 export async function cleanupInjectedEvents() {
-  const raw = await readFile(EVENTS_FILE, "utf8");
+  let raw;
+  try {
+    raw = await readFile(EVENTS_FILE, "utf8");
+  } catch (err) {
+    // 文件不存在（看板尚未产生任何事件）→ 无可清理的测试事件，返回空结果；
+    // 其它 IO 错误（权限/磁盘等）如实抛出，避免把真实故障掩盖成"清理成功"
+    if (err && err.code === "ENOENT") return { removed: 0, kept: 0 };
+    throw err;
+  }
   const lines = raw.split(/\r?\n/).filter(Boolean);
   const kept = [];
   let removed = 0;

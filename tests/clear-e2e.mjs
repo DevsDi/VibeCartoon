@@ -6,7 +6,7 @@
 //
 // 流程：
 //   1. 通过 hooks/collect.mjs 注入 2 个 e2e- 前缀假子 Agent 事件（e2e-clear-a / e2e-clear-b）
-//   2. 确保 main 存在（/api/state 无 main 时注入一条 main 事件；正常情况下看板内存中已有 main）
+//   2. 确保 main 存在（/api/state 无 main 时注入一条 SubagentStart 空 agent_id 的 main 事件；正常情况下看板内存中已有 main）
 //   3. POST /api/agents/clear → 期望 { ok: true, cleared: 2 }
 //   4. GET /api/state → 期望仅剩 main
 //   5. 再次 POST /api/agents/clear → 期望 { ok: true, cleared: 0 }（幂等）
@@ -53,7 +53,7 @@ function inject(payload) {
   });
 }
 
-/** 调用 API，返回 { status, json, text }。 */
+/** 调用 API，返回 { status, ct, json, text }（ct 为 Content-Type 响应头）。 */
 async function api(method, p, body) {
   const res = await fetch(BASE + p, {
     method,
@@ -63,14 +63,14 @@ async function api(method, p, body) {
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* 非 JSON 响应 */ }
-  return { status: res.status, json, text };
+  return { status: res.status, ct: res.headers.get("content-type") || "", json, text };
 }
 
-/** 拉取 /api/state，返回 { ids, byId }（聚合后内存 agent 快照）。 */
+/** 拉取 /api/state，返回 { ids, byId, ct }（聚合后内存 agent 快照 + 响应 Content-Type）。 */
 async function getState() {
   const r = await api("GET", "/api/state");
   const agents = (r.json && Array.isArray(r.json.agents)) ? r.json.agents : [];
-  return { ids: agents.map((a) => a.id), byId: new Map(agents.map((a) => [a.id, a])) };
+  return { ids: agents.map((a) => a.id), byId: new Map(agents.map((a) => [a.id, a])), ct: r.ct };
 }
 
 async function main() {
@@ -89,22 +89,39 @@ async function main() {
   }
 
   // 步骤 2：确保 main 存在（先轮询让服务端增量读注入事件，再判定是否需补 main）
+  //
+  // 注入方式说明：main 是主会话——无 agent_id 的 hook 事件会被服务端聚合到 key="main"
+  // （见 server.mjs applyEvent 的 key 计算：非空 agent → 自身，否则合成 main）。这里刻意注入
+  // SubagentStart + agent_id 空字符串：collect.mjs 把空串原样归一化为 agent=""（`agent_id ?? …`
+  // 不把 "" 当 null），服务端再把空 agent 映射到 "main"，从而以 subagent_start 语义建立 main
+  // 记录。刻意不用 PreToolUse：工具调用路径会把 main 记成 tool 状态并累积 toolCount，与真实
+  // 主会话"会话开始"语义不一致，也避免聚合出的 main 干扰后续 cleared 等计数类断言的直观性。
+  // 该行 agent 为空（非 e2e- 前缀），cleanupInjectedEvents 不会移除它，与真实 main 行同类，
+  // 属可接受残留（见文件头注释）。
   await api("GET", "/api/state");
   let s = await getState();
   if (s && !s.ids.includes("main")) {
-    inject({ hook: "PreToolUse", tool_name: "Read", tool_input: { file_path: "tests/clear-e2e.mjs" } });
+    inject({ hook: "SubagentStart", agent_id: "" });
     await api("GET", "/api/state");
     s = await getState();
   }
   check("main 存在", !!(s && s.ids.includes("main")));
+  check("state 返回 Content-Type: application/json", /^application\/json/.test(s?.ct ?? ""), s?.ct || "(空)");
   check("e2e-clear-a 已被聚合", !!(s && s.ids.includes("e2e-clear-a")), `实际 agents: ${s?.ids?.join(",")}`);
   check("e2e-clear-b 已被聚合", !!(s && s.ids.includes("e2e-clear-b")), `实际 agents: ${s?.ids?.join(",")}`);
 
-  // 步骤 3：POST /api/agents/clear → 期望 { ok: true, cleared: 2 }
+  // 记录清除前非 main 子 Agent 数量，作为 cleared 断言的动态基准（不硬编码 2：
+  // 若看板内存还残留其它真实子 Agent，cleared 会更大，动态计算才能正确断言）
+  const preClearCount = s.ids.filter((id) => id !== "main").length;
+  check("清除前非 main 子 Agent 数量 >= 2（含注入的 2 个）", preClearCount >= 2, `实际 ${preClearCount}`);
+
+  // 步骤 3：POST /api/agents/clear → 期望 { ok: true, cleared: 清除前子 Agent 数量 }
   const c1 = await api("POST", "/api/agents/clear");
   check("clear 返回 HTTP 200", c1.status === 200, `实际 ${c1.status}`);
+  check("clear 返回 Content-Type: application/json", /^application\/json/.test(c1.ct), c1.ct);
   check("clear 返回 ok:true", !!(c1.json && c1.json.ok === true), c1.text);
-  check("clear 返回 cleared:2", !!(c1.json && c1.json.cleared === 2), `实际 cleared=${c1.json?.cleared}`);
+  check("clear 返回 cleared 与清除前一致", !!(c1.json && c1.json.cleared === preClearCount),
+    `期望 cleared=${preClearCount}，实际 cleared=${c1.json?.cleared}`);
 
   // 步骤 4：GET /api/state 中仅剩 main
   s = await getState();
@@ -112,6 +129,7 @@ async function main() {
 
   // 步骤 5：连续调用第二次验证幂等（cleared: 0）
   const c2 = await api("POST", "/api/agents/clear");
+  check("二次 clear 返回 Content-Type: application/json", /^application\/json/.test(c2.ct), c2.ct);
   check("二次 clear 返回 ok:true", !!(c2.json && c2.json.ok === true), c2.text);
   check("二次 clear 返回 cleared:0", !!(c2.json && c2.json.cleared === 0), `实际 cleared=${c2.json?.cleared}`);
 

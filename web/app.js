@@ -111,6 +111,7 @@
   let lastMainAgentCallCount = 0; // main 的 history 中派发/补充任务工具调用（Agent/SendMessage）累计次数基准
   let hasSubAgents = false;       // 本轮渲染是否存在存活子 Agent（方案 E：main 正等子 Agent 交回结果时不判待机）
   let pollTimer = null;           // 轮询定时器句柄，页面不可见时暂停用
+  let syncGeneration = 0;         // 同步按钮代数计数器：每次点击自增，旧代定时器/请求回调校验代数后跳过（防竞态覆盖）
 
   /* 音效默认开启（无开关状态）：由浏览器自动播放策略约束，首次用户交互后解锁，见 audioCtx */
   let audioCtx = null;            // WebAudio 上下文：加载即惰性创建（suspended），首次用户交互后 resume 解锁
@@ -309,7 +310,7 @@
           gain.connect(ctx.destination);
           const a = t0 + n.at;
           gain.gain.setValueAtTime(0.0001, a);
-          gain.gain.exponentialRampToValueAtTime(1.0, a + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.5, a + 0.02);  // 峰值：0.5
           gain.gain.exponentialRampToValueAtTime(0.0001, a + n.dur);
           osc.start(a);
           osc.stop(a + n.dur + 0.04);
@@ -469,14 +470,21 @@
   }
 
   function onSyncClick() {
+    syncGeneration++;              // 递增代数：本次点击开启新一轮同步，旧代定时器/回调全部作废
+    const gen = syncGeneration;    // 捕获本次点击的代数，供下方定时器与请求回调校验是否仍为当前代
     if (!els.syncBtn || els.syncBtn.disabled) return;
     const btn = els.syncBtn;
     btn.disabled = true;             // 立即禁用防重复点击
     btn.classList.add('busy');       // 同步中样式（脉冲动画，见 style.css）
     btn.textContent = '🔄 同步中…';
-    // 无论成功失败，5 秒后自动恢复按钮可点（disabled 按钮不触发 click，定时器不会叠加）
-    setTimeout(function () { btn.disabled = false; }, 5000);
+    // 无论成功失败，5 秒后自动恢复按钮可点（disabled 按钮不触发 click，定时器不会叠加）；
+    // 仅当仍是当前代才恢复，避免旧代定时器干扰新一轮的状态机
+    setTimeout(function () {
+      if (gen === syncGeneration) btn.disabled = false;
+    }, 5000);
     requestSync().then(function (data) {
+      // 代数不匹配：旧请求的迟到回调，新一轮点击已接管，拒绝写入任何按钮状态/反馈
+      if (gen !== syncGeneration) return;
       if (!data || !data.sync || !data.sync.ok) {
         // 失败：console 提示 + 立即复原文案（disabled 恢复交给 5s 定时器），不阻断轮询
         console.warn('[vc-dashboard] 同步子 Agent 请求失败');
@@ -503,8 +511,11 @@
         msg += '；claude 不可用，已降级处理';
       }
       btn.textContent = label;
-      // 完成反馈展示约 5s 后复原默认文案，与下方 5s disabled 恢复同步（消除 4s-5s 不可点困惑窗口）
-      setTimeout(function () { resetSyncBtnText(btn); }, 5000);
+      // 完成反馈展示约 5s 后复原默认文案（仅当仍是当前代才复原，
+      // 杜绝旧定时器把新一轮请求的反馈文案覆盖回"🔄 同步"）
+      setTimeout(function () {
+        if (gen === syncGeneration) resetSyncBtnText(btn);
+      }, 5000);
       // 结果写入 aria-live 播报区（#status-live，屏幕阅读器可感知）
       announce(msg);
     });

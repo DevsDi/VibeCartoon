@@ -154,6 +154,13 @@ function normalizeStatus(raw) {
   return "running";
 }
 
+// 不完整桥接兜底清理阈值（reconcile 轮次）：assistant 行已读（uuidCall 有记录）、但 user 桥接行
+// （sourceToolAssistantUUID + toolUseResult.agentId）超过该轮 reconcile 仍未出现时，判定该桥接
+// 不会再完成（转录文件在 assistant 行后被截断/轮转，或异步 agent 的 user 行始终未写入），
+// 从 uuidCall 清理，避免「永远等待配对」的 uuid 条目无界驻留。宽限留量：正常异步 agent 的
+// async_launched tool_result 在派发后即写入转录，1~2 轮 reconcile 内即可配对，N 轮足以覆盖写入时延。
+const INCOMPLETE_BRIDGE_ROUNDS = 3;
+
 /**
  * 创建一个转录解析器：跨多次增量读累积三份映射。
  * @returns {{ started:Map, completed:Map, keyMap:Map, ingestLine:Function, buildKeyMap:Function, pruneBridges:Function }}
@@ -161,7 +168,9 @@ function normalizeStatus(raw) {
  *   completed : Map<callId|agentId, "done"|"failed"|"running">（同 key 取最新，后写覆盖；
  *               task-id 通知以 agentId 为 key，tool_result/历史 tool-use-id 以 callId 为 key）
  *   keyMap    : Map<callId, agentId>（需调用 buildKeyMap() 构建）
- *   pruneBridges() : 清理已提交桥接且 agent 已达终态的 uuidCall/uuidAgent 条目（有界化，见实现处注释）
+ *   pruneBridges() : 清理已提交桥接且 agent 已达终态的 uuidCall/uuidAgent 条目；未配对的
+ *                    不完整桥接超过 INCOMPLETE_BRIDGE_ROUNDS 轮 reconcile 亦兜底清理
+ *                    （有界化，见实现处注释）
  */
 export function createTranscriptParser() {
   const started = new Map();   // callId -> { description, uuid, async, ts }
@@ -169,6 +178,8 @@ export function createTranscriptParser() {
   const keyMap = new Map();    // callId -> agentId（桥接结果）
   const uuidCall = new Map();  // assistant uuid -> callId（内部桥接用）
   const uuidAgent = new Map(); // assistant uuid -> agentId（内部桥接用）
+  const uuidSeen = new Map();  // uuid -> 首次进入任一桥接映射的 reconcile 轮次（不完整桥接兜底清理基准）
+  let round = 0;               // reconcile 轮次（pruneBridges 每被调用一次 +1，对应一次对账）
 
   // 任务通知以 agentId（<task-id>）为权威：把该 agent 之前由 tool_result 标记的 callId 级 done
   // 同步为通知状态，保证「后到的通知为准」（批量 stopped 通知晚于其各子 Agent 的 tool_result）
@@ -194,6 +205,7 @@ export function createTranscriptParser() {
             c.input && typeof c.input.description === "string" ? c.input.description : null;
           started.set(c.id, { description: desc, uuid: e.uuid, async: !!(c.input && c.input.async), ts: e.timestamp || null });
           uuidCall.set(e.uuid, c.id);
+          if (!uuidSeen.has(e.uuid)) uuidSeen.set(e.uuid, round); // 记录首见轮次（兜底清理基准）
         }
       }
       return;
@@ -232,6 +244,7 @@ export function createTranscriptParser() {
       if (e.sourceToolAssistantUUID && e.toolUseResult &&
           typeof e.toolUseResult.agentId === "string" && e.toolUseResult.agentId) {
         uuidAgent.set(e.sourceToolAssistantUUID, e.toolUseResult.agentId);
+        if (!uuidSeen.has(e.sourceToolAssistantUUID)) uuidSeen.set(e.sourceToolAssistantUUID, round);
       }
       return;
     }
@@ -274,14 +287,39 @@ export function createTranscriptParser() {
   // reconcileCompleted 由 uuid 映射向 callId 级传播状态，提前清理会误判 running
   // 而触发无谓的回填。故两 Map 的量级始终受「在途（未终态）桥接数」限制，
   // 随各会话 agent 收敛即回落，长期运行下有界。
+  //
+  // 修复项X（不完整桥接兜底）：上述逻辑只对「有 uuidAgent 配对」的条目有界，但配对永远
+  // 不发生的情况——assistant 行已读（uuidCall 有记录）、user 桥接行始终未出现（转录文件在
+  // assistant 行后被截断/轮转，或异步 agent 的 user 行在后续 reconcile 中始终未写入）——
+  // 会让 uuidCall 条目无限等待配对而驻留。故对未配对的 uuidCall（及反向孤儿 uuidAgent），
+  // 以其「首见 reconcile 轮次」为基准，超过 INCOMPLETE_BRIDGE_ROUNDS 轮仍未配对即清理：
+  // 此时该 uuid 既未参与 keyMap 桥接（buildKeyMap 需两 Map 同时命中）、也无法被
+  // reconcileCompleted 传播（传播同样需 uuidCall 与 uuidAgent 同时存在），保留无意义；
+  // 正常异步 agent 的 user 行在派发后即写入转录、1~2 轮内配对，N 轮宽限不误伤。
   function pruneBridges() {
+    round++; // 本轮 reconcile（调用方每次对账调用一次本函数）
     for (const [uuid, callId] of uuidCall) {
       const agentId = uuidAgent.get(uuid);
-      if (!agentId) continue; // 桥接未完成（user 桥接行未读到）→ 保留等待
-      const s = completed.get(agentId);
-      if (s === "done" || s === "failed") {
+      if (agentId) {
+        const s = completed.get(agentId);
+        if (s === "done" || s === "failed") {
+          uuidCall.delete(uuid);
+          uuidAgent.delete(uuid);
+          uuidSeen.delete(uuid);
+        }
+      } else if (round - (uuidSeen.get(uuid) ?? round) >= INCOMPLETE_BRIDGE_ROUNDS) {
+        // 不完整桥接超时兜底：清掉永不配对的 uuidCall 条目（及首见轮次记录）
         uuidCall.delete(uuid);
+        uuidSeen.delete(uuid);
+      }
+    }
+    // 反向孤儿：uuidAgent 有、uuidCall 无（user 桥接行读到但 assistant 行缺失，如跨会话引用）
+    // → 同样按轮次兜底清理，防 uuidAgent 侧无界驻留
+    for (const [uuid, agentId] of uuidAgent) {
+      if (uuidCall.has(uuid)) continue; // 有配对 → 交由上方逻辑按终态处理
+      if (round - (uuidSeen.get(uuid) ?? round) >= INCOMPLETE_BRIDGE_ROUNDS) {
         uuidAgent.delete(uuid);
+        uuidSeen.delete(uuid);
       }
     }
   }

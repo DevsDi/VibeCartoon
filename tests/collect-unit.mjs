@@ -3,7 +3,7 @@
 // 直接通过 child_process 以 --dry 模式调用采集器（不写 events.jsonl）：
 //   node hooks/collect.mjs --dry < stdin
 // 断言采集器自身的核心契约：
-//   1. 值级脱敏：sk-*/Bearer/AKIA/eyJ(JWT 头)/Slack xox*/ghr_/ghu_ 等密钥样式 → [REDACTED]
+//   1. 值级脱敏：sk-*/Bearer/AKIA/eyJ(JWT 头)/Slack xox*/ghr_/ghu_/github_pat_ 等密钥样式 → [REDACTED]
 //   2. 字段名黑名单脱敏：private_key / access_key / aws_session_token 等 → [REDACTED]
 //   3. PEM 公私钥整串 → [REDACTED]
 //   4. 截断：超长字符串按 MAX_STR、序列化 detail 按 DETAIL_CAP 截断，均不切出孤立代理对
@@ -293,6 +293,35 @@ suite("字段名黑名单脱敏：api_key / private_key / access_key / aws_sessi
   }
 });
 
+suite("字段名黑名单脱敏：authorization / credential / token / secret / password → [REDACTED]", () => {
+  // 补齐 REDACT_KEY 正则中尚无用例覆盖的字段名分支（值本身非密钥样式，仅靠字段名命中触发整体脱敏）
+  const payload = {
+    hook: "notification",
+    params: {
+      authorization: "auth-0a1b-2c3d",
+      credential: "cred-4e5f-6a7b",
+      api_token: "tok-8c9d-0e1f",
+      client_secret: "sec-2a3b-4c5d",
+      user_password: "pwd-6e7f-8a9b",
+      note: "非敏感字段保持原样",
+    },
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  const d = JSON.parse(r.line.detail);
+  assert.strictEqual(d.params.authorization, "[REDACTED]", "authorization 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.credential, "[REDACTED]", "credential 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.api_token, "[REDACTED]", "api_token（含 token）字段名命中应整体脱敏");
+  assert.strictEqual(d.params.client_secret, "[REDACTED]", "client_secret（含 secret）字段名命中应整体脱敏");
+  assert.strictEqual(d.params.user_password, "[REDACTED]", "user_password（含 password）字段名命中应整体脱敏");
+  assert.strictEqual(d.params.note, "非敏感字段保持原样", "非敏感字段不受影响");
+  for (const v of ["auth-0a1b-2c3d", "cred-4e5f-6a7b", "tok-8c9d-0e1f", "sec-2a3b-4c5d", "pwd-6e7f-8a9b"]) {
+    assert.ok(!r.stdout.includes(v), `stdout 不应残留敏感值: ${v.slice(0, 8)}…`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 6) PEM 整串脱敏
 // ---------------------------------------------------------------------------
@@ -334,6 +363,26 @@ suite("截断：超长字符串按 MAX_STR 截断且不切出孤立代理对", (
   assert.ok(d2.note.endsWith("…[truncated]"), "emoji 超长也应截断");
   assert.ok(!hasLoneSurrogate(d2.note), "对 emoji 截断不应切出孤立代理位");
   assert.ok([...d2.note].length <= MAX_STR + 12, "emoji 截断后的码点数应在 MAX_STR + 标记内");
+});
+
+suite("截断边界：恰好 MAX_STR 不截断，MAX_STR+1 才截断", () => {
+  // 恰好 250 码点：未超限，应原样保留、不带截断标记
+  const exact = "a".repeat(250);
+  const r1 = runCollect(JSON.stringify({ hook: "notification", note: exact }));
+  assert.strictEqual(r1.code, 0, `exit 应为 0，实为 ${r1.code}`);
+  const d1 = JSON.parse(r1.line.detail);
+  assert.strictEqual(d1.note, exact, "恰好 MAX_STR 码点应原样保留");
+  assert.ok(!d1.note.includes("…[truncated]"), "未超限不应带截断标记");
+
+  // 251 码点：超 1 码点即截断为 MAX_STR 码点 + 截断标记
+  const over = "b".repeat(251);
+  const r2 = runCollect(JSON.stringify({ hook: "notification", note: over }));
+  assert.strictEqual(r2.code, 0, `exit 应为 0，实为 ${r2.code}`);
+  const d2 = JSON.parse(r2.line.detail);
+  assert.strictEqual([...d2.note].length, MAX_STR + 12, "MAX_STR+1 应截断为 MAX_STR 码点 + 截断标记长度");
+  assert.strictEqual(d2.note.slice(0, 1), "b", "截断结果应为原文本前缀");
+  assert.ok(d2.note.endsWith("…[truncated]"), "超出 MAX_STR 应带截断标记");
+  assert.ok(!hasLoneSurrogate(d2.note), "边界截断不应含孤立代理位");
 });
 
 suite("截断：序列化 detail 超过 DETAIL_CAP → 追加截断标记", () => {
@@ -437,6 +486,60 @@ suite("值级脱敏：ghu_ 开头的 GitHub Server-to-Server Token → [REDACTED
   assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
   assert.ok(!r.stdout.includes(GHU), `stdout 不应残留 ghu_ token: ${GHU}`);
   assert.ok(r.stdout.includes("ghu_ token 应被脱敏"), "非敏感文本应原样保留");
+});
+
+// ---------------------------------------------------------------------------
+// 13) GitHub Fine-grained PAT（github_pat_）值级脱敏
+// ---------------------------------------------------------------------------
+suite("值级脱敏：github_pat_ 开头的 GitHub Fine-grained PAT → [REDACTED]", () => {
+  const PAT = "github_pat_11AAAA22BBBB33CCCCDDDDEEEEFFFF";
+  const payload = {
+    hook: "notification",
+    fine_pat: PAT,
+    note: "github_pat_ token 应被脱敏",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  assert.ok(!r.stdout.includes(PAT), `stdout 不应残留 github_pat_ token: ${PAT.slice(0, 12)}…`);
+  assert.ok(r.stdout.includes("github_pat_ token 应被脱敏"), "非敏感文本应原样保留");
+});
+
+// ---------------------------------------------------------------------------
+// 14) Slack 非 xoxb 变体（xoxa/xoxp/xoxr/xoxs）值级脱敏
+// ---------------------------------------------------------------------------
+suite("值级脱敏：Slack xoxa / xoxp / xoxr / xoxs 前缀 token → [REDACTED]", () => {
+  const SLACK_A = "xoxa-2-1234567890-abcdefghij";
+  const SLACK_P = "xoxp-1234567890-1234567890-1234567890-abcdefghij";
+  const SLACK_R = "xoxr-1234567890-abcdefghij-1234567890-abcdefghij";
+  const SLACK_S = "xoxs-1234567890-1234567890-1234567890-abcdefghij";
+  const secrets = [SLACK_A, SLACK_P, SLACK_R, SLACK_S];
+
+  const payload = {
+    hook: "notification",
+    detail: {
+      result: {
+        output: [
+          `slack=${SLACK_A}`,
+          `slack=${SLACK_P}`,
+          `slack=${SLACK_R}`,
+          `slack=${SLACK_S}`,
+          "Slack xox 各前缀变体都应被脱敏",
+        ],
+      },
+    },
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.stdout.includes("[REDACTED]"), "stdout 应包含 [REDACTED] 替换标记");
+  for (const s of secrets) {
+    assert.ok(!r.stdout.includes(s), `stdout 不应残留 Slack token: ${s.slice(0, 12)}…`);
+  }
+  assert.ok(r.stdout.includes("Slack xox 各前缀变体都应被脱敏"), "非敏感文本应原样保留");
 });
 
 // ---------------------------------------------------------------------------
