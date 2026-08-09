@@ -149,7 +149,7 @@ suite("正常事件原样透传（hook 归一化，字段不被误删/误脱敏�
 });
 
 // ---------------------------------------------------------------------------
-// 3.1) 自动同步新增字段抽取：transcriptPath / toolUseId 首层提取且不进 detail
+// 4) T2 自动同步新增字段：transcriptPath / toolUseId 首层提取且不进 detail
 // ---------------------------------------------------------------------------
 suite("新增字段抽取：transcriptPath / toolUseId 独立首层字段且不进 detail", () => {
   const TP = "C:\\Users\\1\\.claude\\projects\\D--workspace-Vibe-Cartoon-vc-dashboard\\session-e2e.jsonl";
@@ -181,8 +181,91 @@ suite("新增字段空值：无 transcript_path / tool_use_id 不应填充", () 
   assert.strictEqual(r.line.toolUseId, null, "无 tool_use_id 应为 null");
 });
 
+suite("T2 透传：transcriptPath 含空格/中文/emoji 应原样透传、不报错", () => {
+  // 覆盖特殊字符路径（空格、中文、emoji）；Windows 反斜杠路径已由上方"新增字段抽取"用例覆盖，此处用正斜杠避免转义歧义
+  const TP = "/data/我的 项目/会话 🎉 e2e.jsonl";
+  const r = runCollect(JSON.stringify({
+    hook: "SubagentStart",
+    agent_id: "e2e-special-char",
+    transcript_path: TP,
+    prompt: "透传测试",
+  }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.transcriptPath, TP, "含特殊字符的 transcript_path 应原样透传");
+  assert.ok(!hasLoneSurrogate(r.line.transcriptPath), "透传结果不应含孤立代理位");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("transcript_path" in d), "transcript_path 不应重复进入 detail");
+});
+
+suite("T2 空值边界：tool_use_id 为空字符串 \"\"（非 null 但 falsy）→ 归一化为 null", () => {
+  const r = runCollect(JSON.stringify({
+    hook: "PreToolUse",
+    agent_id: "e2e-empty-tui",
+    tool_name: "Read",
+    tool_use_id: "",                        // 非 null，但为 falsy
+    tool_input: { file_path: "/tmp/a.txt" },
+  }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.toolUseId, null, "空字符串 tool_use_id 应归一化为 null");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("tool_use_id" in d), "tool_use_id 不应重复进入 detail");
+});
+
+suite("T2 EXCLUDED：transcript_path 同时存在于顶层与 payload.detail 容器 → 顶层抽取、detail 不重复", () => {
+  const TOP = "/tmp/top-level-e2e.jsonl";
+  const NESTED = "/tmp/nested-e2e.jsonl";
+  const payload = {
+    hook: "SubagentStart",
+    agent_id: "e2e-excluded",
+    transcript_path: TOP,                   // 顶层 → 抽取为 transcriptPath
+    tool_use_id: "call_00_excluded_1",      // 顶层 → 抽取为 toolUseId
+    detail: { transcript_path: NESTED, note: "容器内容原样保留" }, // payload 自带 detail 容器，内含同名键
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.transcriptPath, TOP, "顶层 transcript_path 应抽取为 transcriptPath");
+  assert.strictEqual(r.line.toolUseId, "call_00_excluded_1", "顶层 tool_use_id 应抽取为 toolUseId");
+
+  // EXCLUDED 生效：顶层已抽取字段不再进入输出 detail（顶层值不重复）
+  assert.ok(!r.line.detail.includes(TOP), "顶层 transcript_path 值不应出现在输出 detail");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("transcript_path" in d), "输出 detail 顶层不应含 transcript_path 键");
+  assert.ok(!("tool_use_id" in d), "输出 detail 顶层不应含 tool_use_id 键");
+  assert.strictEqual(d.detail.note, "容器内容原样保留", "payload 自带 detail 容器内容应原样透传");
+});
+
+suite("T2 组合场景：payload 同时含 transcript_path 与 tool_use_id → 两字段都正确抽取", () => {
+  const TP = "/data/e2e-combined.jsonl";
+  const payload = {
+    hook: "SubagentStart",
+    agent_id: "e2e-combined",
+    agent_type: "Task",
+    transcript_path: TP,
+    tool_use_id: "call_00_combined_777",
+    tool_name: "Read",
+    prompt: "组合场景",
+    status: "success",
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.strictEqual(r.line.transcriptPath, TP, "transcript_path 应抽取为 transcriptPath");
+  assert.strictEqual(r.line.toolUseId, "call_00_combined_777", "tool_use_id 应抽取为 toolUseId");
+  assert.strictEqual(r.line.status, "success", "status 应同时被抽取为首层字段");
+  const d = JSON.parse(r.line.detail);
+  assert.ok(!("transcript_path" in d), "transcript_path 不应重复进入 detail");
+  assert.ok(!("tool_use_id" in d), "tool_use_id 不应重复进入 detail");
+  assert.ok(!("status" in d), "status 已被抽取，不应重复进入 detail");
+  assert.strictEqual(d.prompt, "组合场景", "其余字段仍保留在 detail");
+});
+
 // ---------------------------------------------------------------------------
-// 4) 字段名黑名单脱敏
+// 5) 字段名黑名单脱敏
 // ---------------------------------------------------------------------------
 suite("字段名黑名单脱敏：api_key / private_key / access_key / aws_session_token → [REDACTED]", () => {
   const payload = {
@@ -211,7 +294,7 @@ suite("字段名黑名单脱敏：api_key / private_key / access_key / aws_sessi
 });
 
 // ---------------------------------------------------------------------------
-// 5) PEM 整串脱敏
+// 6) PEM 整串脱敏
 // ---------------------------------------------------------------------------
 suite("PEM 公私钥整串 → [REDACTED]（不残留证书头/内容）", () => {
   const pem = [
@@ -231,7 +314,7 @@ suite("PEM 公私钥整串 → [REDACTED]（不残留证书头/内容）", () =>
 });
 
 // ---------------------------------------------------------------------------
-// 6) MAX_STR / DETAIL_CAP 截断（码点安全，不切出孤立代理对）
+// 7) MAX_STR / DETAIL_CAP 截断（码点安全，不切出孤立代理对）
 // ---------------------------------------------------------------------------
 suite("截断：超长字符串按 MAX_STR 截断且不切出孤立代理对", () => {
   // ASCII 长文本
@@ -268,7 +351,7 @@ suite("截断：序列化 detail 超过 DETAIL_CAP → 追加截断标记", () =
 });
 
 // ---------------------------------------------------------------------------
-// 7) JSON 解析失败分支
+// 8) JSON 解析失败分支
 // ---------------------------------------------------------------------------
 suite("非法 JSON：畸形输入恒 exit 0，且 stderr 记录解析失败", () => {
   const r = runCollect('{ "hook": "SubagentStart", "broken": "');
@@ -282,7 +365,7 @@ suite("非法 JSON：畸形输入恒 exit 0，且 stderr 记录解析失败", ()
 });
 
 // ---------------------------------------------------------------------------
-// 8) AKIA 值级脱敏（AWS Access Key ID）
+// 9) AKIA 值级脱敏（AWS Access Key ID）
 // ---------------------------------------------------------------------------
 suite("值级脱敏：AKIA 开头的 AWS Access Key ID → [REDACTED]", () => {
   const payload = {
@@ -300,7 +383,7 @@ suite("值级脱敏：AKIA 开头的 AWS Access Key ID → [REDACTED]", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9) JWT 值级脱敏
+// 10) JWT 值级脱敏
 // ---------------------------------------------------------------------------
 suite("值级脱敏：eyJ 开头的裸 JWT → [REDACTED]", () => {
   const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
@@ -319,7 +402,7 @@ suite("值级脱敏：eyJ 开头的裸 JWT → [REDACTED]", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 10) GitHub Refresh Token（ghr_）值级脱敏
+// 11) GitHub Refresh Token（ghr_）值级脱敏
 // ---------------------------------------------------------------------------
 suite("值级脱敏：ghr_ 开头的 GitHub Refresh Token → [REDACTED]", () => {
   const GHR = "ghr_1ABCDefghijklmnop2345";
@@ -338,7 +421,7 @@ suite("值级脱敏：ghr_ 开头的 GitHub Refresh Token → [REDACTED]", () =>
 });
 
 // ---------------------------------------------------------------------------
-// 11) GitHub Server-to-Server Token（ghu_）值级脱敏
+// 12) GitHub Server-to-Server Token（ghu_）值级脱敏
 // ---------------------------------------------------------------------------
 suite("值级脱敏：ghu_ 开头的 GitHub Server-to-Server Token → [REDACTED]", () => {
   const GHU = "ghu_1ABCDefghijklmnop2345";
@@ -360,15 +443,17 @@ suite("值级脱敏：ghu_ 开头的 GitHub Server-to-Server Token → [REDACTED
 // 结果汇总
 // ---------------------------------------------------------------------------
 console.log("================ vc-dashboard collect 单元测试 ================");
+// 编号由 suites 数组下标自动生成（从 1 开始、连续唯一），杜绝手工编号错位/重复
 let pass = 0, fail = 0;
-for (const { name, fn } of suites) {
+for (const [i, { name, fn }] of suites.entries()) {
+  const no = i + 1;
   try {
     fn();
     pass++;
-    console.log(`  [PASS] ${name}`);
+    console.log(`  [PASS] ${no}. ${name}`);
   } catch (err) {
     fail++;
-    console.log(`  [FAIL] ${name}`);
+    console.log(`  [FAIL] ${no}. ${name}`);
     console.log(`        说明: ${err.message}`);
   }
 }

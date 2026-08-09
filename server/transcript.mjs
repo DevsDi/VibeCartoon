@@ -20,6 +20,7 @@
 //   - keyMap         : user 行 toolUseResult.agentId + sourceToolAssistantUUID 桥接 callId ↔ agentId
 
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { open as openFile } from "node:fs/promises";
 import { TRANSCRIPT_ROOT } from "../config.mjs";
 
@@ -74,8 +75,16 @@ export function resetWatermark(sessionId) {
 // 由 cwd 推导项目 slug（与 Claude Code 约定一致）：把 :、\、/、空格 全部替换为 '-'。
 // 例：D:\workspace\Vibe Cartoon → D--workspace-Vibe-Cartoon
 // 注意：Windows 下 slug 大小写不稳定（cwd 传入时可能小写 d），但文件系统大小写不敏感，可正常命中。
+// slug 长度上限（防御极端/恶意 cwd 产生超长路径，Windows MAX_PATH=260）。实际 Claude Code
+// slug 远小于此（如 D--workspace-Vibe-Cartoon-vc-dashboard），仅对超长 cwd 防御性截断。
+const SLUG_MAX_LEN = 100;
 export function slugFromCwd(cwd) {
-  return String(cwd || "").replace(/[:/\\ ]/g, "-");
+  const slug = String(cwd || "").replace(/[:/\\ ]/g, "-");
+  if (slug.length <= SLUG_MAX_LEN) return slug;
+  // 超长截断：保留前 SLUG_MAX_LEN-9 字符主体，追加 8 位 SHA-256 短哈希后缀，
+  // 避免不同 cwd 截断到同一前缀时 slug 撞名（截断后总长恰为 SLUG_MAX_LEN）。
+  const hash = createHash("sha256").update(slug).digest("hex").slice(0, 8);
+  return slug.slice(0, SLUG_MAX_LEN - 9) + "-" + hash;
 }
 
 /**
@@ -118,15 +127,18 @@ export async function readSessionTranscript(sessionId, filePath) {
 // ---------------------------------------------------------------------------
 // T6 转录解析器
 // ---------------------------------------------------------------------------
-// 提取 <tag>...</tag> 中的值（内容为字面 < >，非 HTML 实体转义）
+// 提取 <tag>...</tag> 中的值。内容允许含其它标签/裸 <，但不允许内部再出现同名 <tag> 或 </tag>
+//（负向前瞻保证匹配的是"最内层"同名标签对），防御转录中出现嵌套同名标签导致取值错误
+//（实际 Claude Code 转录无此情况，属理论风险）。
 function extractTag(content, tag) {
-  const m = content.match(new RegExp(`<${tag}>([^<]*)</${tag}>`));
+  const m = content.match(new RegExp(`<${tag}>((?:(?!<\\/?${tag}[\\s>])[\\s\\S])*?)</${tag}>`));
   return m ? m[1] : null;
 }
 
 // 提取 <tag>...</tag> 的所有值（缺陷1：批量通知内多个 <task-id> 共用一个 <status>）
+// 与 extractTag 同款健壮正则 + 全局标志，逐段取出每个最内层同名标签对的值。
 function extractAllTags(content, tag) {
-  const re = new RegExp(`<${tag}>([^<]*)</${tag}>`, "g");
+  const re = new RegExp(`<${tag}>((?:(?!<\\/?${tag}[\\s>])[\\s\\S])*?)</${tag}>`, "g");
   const out = [];
   let m;
   while ((m = re.exec(content))) out.push(m[1]);

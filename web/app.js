@@ -461,7 +461,7 @@
     }
   }
 
-  /* 同步按钮复原：去除 busy 状态并恢复默认文案（约 4s 后，见 onSyncClick） */
+  /* 同步按钮复原：去除 busy 状态并恢复默认文案（约 5s 后，见 onSyncClick） */
   function resetSyncBtnText(btn) {
     if (!btn) return;
     btn.classList.remove('busy');
@@ -503,8 +503,8 @@
         msg += '；claude 不可用，已降级处理';
       }
       btn.textContent = label;
-      // 完成反馈展示约 4s 后复原默认文案
-      setTimeout(function () { resetSyncBtnText(btn); }, 4000);
+      // 完成反馈展示约 5s 后复原默认文案，与下方 5s disabled 恢复同步（消除 4s-5s 不可点困惑窗口）
+      setTimeout(function () { resetSyncBtnText(btn); }, 5000);
       // 结果写入 aria-live 播报区（#status-live，屏幕阅读器可感知）
       announce(msg);
     });
@@ -635,7 +635,6 @@
         playChime('done');
         announce('子 Agent ' + displayName(a) + ' 完成');
       } else {
-        playChime('failed');
         announce('子 Agent ' + displayName(a) + ' 失败');
       }
       // 立即挥手拜拜 → 淡出离场（首帧终态无派发/汇报时序可等，不设等待窗口）
@@ -691,12 +690,11 @@
         // failed 前一刻（如"调用工具中"蓝色 spinner），必须在此一次性改写。
         // 不复用 status-failed / status-done，避免与完成举手/挥手动画互相干扰
         if (!isDone) markCardFailed(cardEl);
-        // P1：音效 + 无障碍播报——完成短促上升音、失败低沉下降音，并写入 aria-live
+        // P1：音效 + 无障碍播报——完成短促上升音（失败音已随 playChime 入口禁用），并写入 aria-live
         if (isDone) {
           playChime('done');
           announce('子 Agent ' + displayName(a) + ' 完成');
         } else {
-          playChime('failed');
           announce('子 Agent ' + displayName(a) + ' 失败');
         }
         // 完成庆祝（仅 done）：粒子散开 ~1.8s 后才进入挥手拜拜；

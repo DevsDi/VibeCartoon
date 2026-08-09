@@ -1307,40 +1307,7 @@ body {
   cursor: not-allowed;
 }
 
-/* 原"清除僵尸"按钮样式（T2 遗留）：顶部操作区胶囊按钮，警告色（橙/黄，复用
- * --queued，非红色区别于停止按钮）。T10 起前端按钮语义切换为"同步"（.sync-btn，
- * 见下方块），此块保留作其胶囊样式基础；/api/agents/clear 服务端接口保留不动。 */
-.clear-zombies-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 14px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 700;
-  line-height: 1.5;
-  color: var(--queued);
-  background: rgba(var(--queued-rgb), 0.10);
-  border: 1px solid rgba(var(--queued-rgb), 0.55);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background-color 0.18s ease, border-color 0.18s ease;
-}
-
-.clear-zombies-btn:hover:not(:disabled) {
-  background: rgba(var(--queued-rgb), 0.24);
-  border-color: var(--queued);
-}
-
-.clear-zombies-btn:disabled {
-  color: var(--muted-2);
-  background: rgba(141, 151, 173, 0.08);
-  border-color: rgba(141, 151, 173, 0.35);
-  cursor: not-allowed;
-}
-
-/* 同步按钮（T10/T11）：顶部操作区胶囊按钮，复用 .clear-zombies-btn 的胶囊样式基础，
- * 配色改为主色/绿色（--done，区别于清除按钮的警告橙 --queued）；
+/* 同步按钮（T10/T11）：顶部操作区胶囊按钮，配色主色/绿色（--done），
  * hover 加深，disabled 灰化（防重复点击期间，见 app.js onSyncClick）。 */
 .sync-btn {
   display: inline-flex;

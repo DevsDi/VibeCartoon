@@ -22,6 +22,10 @@ function runClaudeAgentsJson() {
         timeout: SYNC_ENUM_TIMEOUT_MS,
         maxBuffer: 10 * 1024 * 1024, // 输出上限 10MB（会话列表远小于此）
         windowsHide: true,           // Windows 下不弹黑窗
+        // Windows 下经 cmd.exe 执行：兼容 CLAUDE_BIN 含空格路径（如 "C:\Program Files\..."）
+        // 及 claude.cmd 包装脚本——直接 CreateProcess 对空格路径/批处理会找不到文件。
+        // 非 Windows 平台 shell:false，保持原有直接 spawn 行为不变。
+        shell: process.platform === "win32",
       },
       (err, stdout) => {
         if (err) return reject(err);
