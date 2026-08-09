@@ -10,7 +10,7 @@ Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 
 - **任务名称解析**：`post_tool_use` 按 `tool_response.agentId` 精确配对子 Agent 名称；`pre_tool_use` 中主 Agent 调用 Agent 工具时登记 `pendingDispatch`（LIFO）作为待消费的任务描述；`subagent_start` 按「精确配对 → LIFO 派发描述 → 事件自带 prompt」三级优先级消费。主 Agent 恒显示「主 Agent」。
 - **子 Agent 停止请求**：存活中的子 Agent（`queued`/`thinking`/`tool`/`asking`）卡片提供「⏹ 停止」按钮，点击向后端发出 `POST /api/agents/:id/stop`，按钮随即变为「⏹ 已停止」并灰化、卡片降饱和；服务端把请求原子追加到独立文件 `data/stop-signals.jsonl`，由外部（主会话）消费该文件执行真实中断。本仓库负责看板侧的「停止请求 + 状态标记」闭环；已 `done`/`failed` 或已离场的 Agent 不提供按钮，主 Agent（`main`）不支持停止。
 - **完成提示音与无障碍播报**：子 Agent 完成/失败时播放短促提示音（完成→上升双音、失败→低沉单音），并写入 aria-live 播报区供屏幕阅读器感知。动效固定跟随系统：系统开启「减少动态」（prefers-reduced-motion）时自动关闭动画与提示音；音效默认开启，受浏览器自动播放策略限制，需先点击页面一次解锁（首次访问时页面顶部会显示「点击页面启用完成音效」轻提示，点击后自动消失）。
-- **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。
+- **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。脱敏覆盖：字段名黑名单（`api_key`/`token`/`secret`/`password`/`private_key`/`access_key`/`aws_session_token` 等）整体替换；值级敏感样式（`sk-*`/`Bearer`/`ghp_`/`gho_`/`ghr_`/`ghu_`/`xox*`/`AKIA`/`eyJ`(JWT)/`aws_session_token`）逐段替换为 `[REDACTED]`；PEM 证书整串替换。
 - **零运行时依赖**：服务端为纯 Node ESM http server，前端为原生 JS + CSS，无框架、不连外网。
 
 ## 快速开始
@@ -50,7 +50,7 @@ http://localhost:8617
 | `PostToolUse` | `post_tool_use` | 调用工具后 |
 | `Notification` | `notification` | 通知（如等待用户输入） |
 
-每条事件保留字段：`ts`、`hook`、`agent`、`type`、`tool`、`status`、`detail`、`tok`。其中 `detail` 会做脱敏（字段名命中 `api_key`/`token`/`secret`/`password` 等黑名单整体替换为 `[REDACTED]`）与截断（普通字符串 250 字符、序列化后总长 2000 字符）。
+每条事件保留字段：`ts`、`hook`、`agent`、`type`、`tool`、`status`、`detail`、`tok`。其中 `detail` 会做脱敏（字段名命中 `api_key`/`token`/`secret`/`password`/`private_key`/`access_key`/`aws_session_token` 等黑名单整体替换为 `[REDACTED]`；值级敏感样式如 `sk-*`/`Bearer`/`ghp_`/`gho_`/`ghr_`/`ghu_`/`xox*`/`AKIA`/`eyJ`(JWT)/`aws_session_token` 逐段替换为 `[REDACTED]`；PEM 证书整串替换）与截断（普通字符串 250 字符、序列化后总长 2000 字符）。
 
 ### Claude Code hooks 接线（settings.json 示例）
 
@@ -173,9 +173,18 @@ npm run test:unit
 node tests/cleanup.mjs
 ```
 
-- **测试范围**：`tests/collect-unit.mjs` 直接以 `--dry` 模式通过 `child_process` 调用 `hooks/collect.mjs`（不写事件文件），断言三个契约：
-  1. 值级脱敏（sk- / Bearer / ghp_ / gho_ / xox* 等密钥样式 → `[REDACTED]`）；
-  2. 输入限长（stdin 超 8MB 直接丢弃且恒 exit 0）；
-  3. 正常事件原样透传（hook 归一化，字段不误删/误脱敏）。
+- **测试范围**：`tests/collect-unit.mjs` 直接以 `--dry` 模式通过 `child_process` 调用 `hooks/collect.mjs`（不写事件文件），共 **12 个用例**，覆盖以下契约：
+  1. 值级脱敏：`sk-*` / `Bearer` / `ghp_` / `gho_` / `xox*` 密钥样式 → `[REDACTED]`
+  2. 值级脱敏：`AKIA` 开头的 AWS Access Key ID → `[REDACTED]`
+  3. 值级脱敏：`eyJ` 开头的裸 JWT → `[REDACTED]`
+  4. 值级脱敏：`ghr_` 开头的 GitHub Refresh Token → `[REDACTED]`
+  5. 值级脱敏：`ghu_` 开头的 GitHub Server-to-Server Token → `[REDACTED]`
+  6. 字段名黑名单脱敏：`api_key` / `private_key` / `access_key` / `aws_session_token` → `[REDACTED]`
+  7. PEM 公私钥整串 → `[REDACTED]`
+  8. 截断：超长字符串按 `MAX_STR`（250 字符）截断，码点安全（不切出孤立代理对）
+  9. 截断：序列化 `detail` 超过 `DETAIL_CAP`（2000 字符）→ 追加截断标记
+  10. 输入限长：stdin 超 8MB 直接丢弃且恒 exit 0
+  11. 非法 JSON：畸形输入恒 exit 0，且 stderr 记录解析失败
+  12. 正常事件原样透传（hook 归一化，字段不被误删/误脱敏）
 
 更完整的测试说明见 `tests/README.md`。
