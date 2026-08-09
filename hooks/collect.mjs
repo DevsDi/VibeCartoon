@@ -33,24 +33,30 @@ const HOOK_MAP = {
 };
 
 // 脱敏黑名单：字段名匹配即整体替换为 [REDACTED]
-const REDACT_KEY = /api[_-]?key|token|secret|password|authorization|credential|BEGIN[\s\S]*KEY/i;
+// （api_key/token/secret/password/authorization/credential/证书块等，另含
+//   private_key / access_key / aws_session_token，均为常见密钥字段名）
+const REDACT_KEY =
+  /api[_-]?key|token|secret|password|authorization|credential|BEGIN[\s\S]*KEY|private_key|access_key|aws_session_token/i;
 
 // 值级敏感字段：字符串值命中常见密钥样式即替换为 [REDACTED]（大小写敏感）
-//   sk-*   -> Anthropic 密钥
-//   Bearer -> 认证头令牌
+//   sk-*              -> Anthropic 密钥
+//   Bearer            -> 认证头令牌
 //   ghp_ / gho_ / github_pat_ -> GitHub Personal / OAuth / Fine-grained PAT
-//   xoxb/a/p/r/s- -> Slack token
+//   xoxb/a/p/r/s-     -> Slack token
+//   AKIA              -> AWS Access Key ID（AKIA + 16 位大写字母/数字）
+//   eyJ...            -> JWT（Base64url 头），独立于 Bearer 前缀的裸 JWT 也能命中
+//   aws_session_token -> AWS 会话令牌（值紧跟键名，如 "aws_session_token=+F...=="）
 const REDACT_VALUE =
-  /sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}/g;
+  /sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}|aws_session_token[A-Za-z0-9/+_=\-]{10,}/g;
 
 // 读入 stdin 的总字节上限：8MB，超出直接丢弃本条事件（不崩，恒 exit 0）
 const MAX_STDIN_BYTES = 8 * 1024 * 1024;
 // 参与解析/拷贝的原始 JSON 字节上限：1MB，先按字节截断再解析，避免超大对象拷贝撑爆内存
 const MAX_INPUT_BYTES = 1 << 20;
 
-// 普通字符串截断阈值
+// 普通字符串截断阈值（按码点截断，避免切出孤立代理对）
 const MAX_STR = 250;
-// 序列化后的 detail 总长度上限
+// 序列化后的 detail 总长度上限（按码点截断）
 const DETAIL_CAP = 2000;
 
 // ---------------------------------------------------------------------------
@@ -92,12 +98,28 @@ function redactText(text) {
   return typeof text === "string" ? text.replace(REDACT_VALUE, "[REDACTED]") : text;
 }
 
+// 按 Unicode 码点（code point）截断：String.prototype.slice 按 UTF-16 码元切，会把一个由
+// 高低代理位组成的增补平面字符（emoji 等）切成孤立代理对（损坏数据）。这里用 for...of 按码点
+// 遍历取前 max 个码点，保证不切出孤立代理对，且零依赖（无需 Intl.Segmenter）。MAX_STR/DETAIL_CAP
+// 因此语义为"码点点数"而非 UTF-16 码元数。
+function truncateCodePoints(s, max) {
+  if (s.length <= max) return s; // 码元长度已在预算内：码点数必然 ≤ max，直接原样返回
+  let out = "";
+  let n = 0; // 已取码点数
+  for (const ch of s) {
+    if (n >= max) break;
+    out += ch;
+    n++;
+  }
+  return out;
+}
+
 function sanitizeString(val) {
   // 私钥/密钥文本块整体替换
   if (/BEGIN[\s\S]*KEY/.test(val) || /^-----BEGIN/.test(val)) return "[REDACTED]";
   // 值级敏感匹配（脱敏后再截断，避免截断后的残留密钥片段漏出去）
   val = redactText(val);
-  if (val.length > MAX_STR) return val.slice(0, MAX_STR) + "…[truncated]";
+  if (val.length > MAX_STR) return truncateCodePoints(val, MAX_STR) + "…[truncated]";
   return val;
 }
 
@@ -147,9 +169,10 @@ function buildLine(payload) {
     payload.agent?.agent_type ??
     null;
 
-  // tool 相关 hook 才有 tool 名
+  // tool 相关 hook 才有 tool 名。取数来源：tool_name → tool → tool_use.name；
+  // 此前的"tool 为空时对 pre/post_tool_use 再查一次 tool_use.name"是死兜底——
+  // 第一条 ?? 链已覆盖该来源（三次取值任一命中即非空），删除冗余分支。
   let tool = payload.tool_name ?? payload.tool ?? payload.tool_use?.name ?? null;
-  if (tool == null && (hook === "pre_tool_use" || hook === "post_tool_use")) tool = payload.tool_use?.name ?? null;
 
   let status = payload.status ?? payload.result?.status ?? payload.subagent_stop?.status ?? null;
   // 子 agent stop 失败信号：status 为 null 时，仅凭结构化失败信号判定（顶层/嵌套 error 字段存在、success === false）。
@@ -173,7 +196,7 @@ function buildLine(payload) {
   if (detail) {
     // 序列化后的整段文本再过一遍值脱敏，兜底嵌套拼接/转义等未覆盖的密钥样式残留，之后才做既有截断
     detail = redactText(detail);
-    if (detail.length > DETAIL_CAP) detail = detail.slice(0, DETAIL_CAP) + "…[truncated]";
+    if (detail.length > DETAIL_CAP) detail = truncateCodePoints(detail, DETAIL_CAP) + "…[truncated]";
   }
 
   return {

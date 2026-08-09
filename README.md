@@ -9,7 +9,7 @@ Claude Code Agent 活动可视化看板。通过 Claude Code hooks 采集 Agent 
 - **火柴人任务动画**：新子 Agent 出现或主 Agent 补充派发任务时，火柴人手持文件从主 Agent 卡片跑向子 Agent 卡片（toSub，😎）；子 Agent 完成/失败后火柴人跑回主 Agent 汇报（backToMain，done → 😄 带绿勾，failed → 😢 不带勾），并触发「收到 / 驳回」闪光与子卡挥手拜拜离场。首次渲染有 `stickmanSeeded` 守卫，页面刷新不会涌出一堆火柴人。
 - **任务名称解析**：`post_tool_use` 按 `tool_response.agentId` 精确配对子 Agent 名称；`pre_tool_use` 中主 Agent 调用 Agent 工具时登记 `pendingDispatch`（LIFO）作为待消费的任务描述；`subagent_start` 按「精确配对 → LIFO 派发描述 → 事件自带 prompt」三级优先级消费。主 Agent 恒显示「主 Agent」。
 - **子 Agent 停止请求**：存活中的子 Agent（`queued`/`thinking`/`tool`/`asking`）卡片提供「⏹ 停止」按钮，点击向后端发出 `POST /api/agents/:id/stop`，按钮随即变为「⏹ 已停止」并灰化、卡片降饱和；服务端把请求原子追加到独立文件 `data/stop-signals.jsonl`，由外部（主会话）消费该文件执行真实中断。本仓库负责看板侧的「停止请求 + 状态标记」闭环；已 `done`/`failed` 或已离场的 Agent 不提供按钮，主 Agent（`main`）不支持停止。
-- **完成提示音与无障碍播报**：子 Agent 完成/失败时播放短促提示音（完成→上升双音、失败→低沉单音），并写入 aria-live 播报区供屏幕阅读器感知。提示音受浏览器自动播放策略限制，需先点击页面任意位置一次即可启用（首次访问时页面顶部会显示「点击页面启用完成音效」轻提示，点击后自动消失）。
+- **完成提示音与无障碍播报**：子 Agent 完成/失败时播放短促提示音（完成→上升双音、失败→低沉单音），并写入 aria-live 播报区供屏幕阅读器感知。动效固定跟随系统：系统开启「减少动态」（prefers-reduced-motion）时自动关闭动画与提示音；音效默认开启，受浏览器自动播放策略限制，需先点击页面一次解锁（首次访问时页面顶部会显示「点击页面启用完成音效」轻提示，点击后自动消失）。
 - **事件采集**：`hooks/collect.mjs` 从 stdin 接收 Claude Code hook JSON，归一化、脱敏、截断后追加到 `data/events.jsonl`，永不抛错、恒退出码 0。
 - **零运行时依赖**：服务端为纯 Node ESM http server，前端为原生 JS + CSS，无框架、不连外网。
 

@@ -28,19 +28,8 @@
         <span id="updated-at" class="updated-at">—</span>
       </div>
 
-      <!-- 顶部操作区（P1）：特效密度 / 音效开关 -->
+      <!-- 顶部操作区：动效固定跟随系统、音效默认开启，仅保留音效启用轻提示 -->
       <div class="header-actions">
-        <label class="ctl-label" for="motion-select">特效</label>
-        <select id="motion-select" class="ctl-select">
-          <option value="auto">自动</option>
-          <option value="reduced">减少</option>
-          <option value="off">关闭</option>
-        </select>
-        <label class="ctl-label ctl-check" for="sound-toggle">
-          <input type="checkbox" id="sound-toggle" />
-          <span>音效</span>
-        </label>
-
         <!-- 音效启用轻提示（P1）：仅首次访问且尚未点击页面时显示；点击页面任意位置或 ✕ 后淡出移除（见 app.js） -->
         <div id="sound-tip" class="sound-tip hidden">
           <span class="sound-tip-text">🔊 点击页面启用完成音效</span>

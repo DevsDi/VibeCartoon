@@ -45,17 +45,20 @@ async function readFileRange(filePath, offset, maxSize = Infinity) {
   }
   try {
     const size = (await fh.stat()).size;
-    if (size < offset) {
-      // 文件被截断或轮转后变小：重置 offset 从头读
-      return { lines: [], size, truncated: true };
-    }
-    if (size === offset) return { lines: [], size, truncated: false };
+    // 文件被截断/轮转后变小（size < offset，游标已越过新文件末尾）：
+    // 0..size 段仍是存活的既有事件，本轮直接从 0 重读并把它们返回（正确聚合已有行），
+    // 不再整段跳过只把 offset 复位（旧实现会丢弃这 0..size 段的数据）。
+    // 返回值 truncated=true 通告调用方本轮发生过截断/轮转，需把 offset/cursor 对齐到 size。
+    // rotate 场景保留：轮转期间 rotateBusy 忙标志已让读方等待完成后才 open，
+    // 因此这里打开的是稳定文件；即便撞上改名中的旧 inode，读到的也是其既有内容，不丢行。
+    const start = size < offset ? 0 : offset;
+    if (size === start) return { lines: [], size, truncated: size < offset };
 
-    const readLen = Math.min(size - offset, maxSize);
+    const readLen = Math.min(size - start, maxSize);
     const buf = Buffer.alloc(readLen);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, start);
     const text = buf.subarray(0, bytesRead).toString("utf8");
-    return { lines: text.split(/\r?\n/).filter(Boolean), size, truncated: false };
+    return { lines: text.split(/\r?\n/).filter(Boolean), size, truncated: size < offset };
   } finally {
     await closeHandle(fh);
   }
@@ -77,7 +80,8 @@ async function readNewLines() {
   // 正在轮转时最多等待 500ms（每 10ms 探测一次），保证读到的是稳定文件
   for (let i = 0; i < 50 && rotateBusy; i++) await delayMs(10);
   const result = await readFileRange(EVENTS_FILE, readOffset);
-  if (result.truncated) readOffset = 0; // 文件被截断或轮转：从头重读（保持既有 offset 归零逻辑）
+  // 文件被截断/轮转时，readFileRange 本轮已从 0 重读 0..size 的既有行（不丢行、正确聚合）；
+  // 这里统一把 offset 对齐到当前文件大小，无需再针对 truncated 单独归零。
   readOffset = result.size;
   return result.lines;
 }
@@ -222,14 +226,6 @@ function readStopRequestedIds() {
   return ids;
 }
 
-// 以文件为准刷新内存视图（供 append/prune 使用），并返回该快照
-function syncStopSignalsFromFile() {
-  const map = readStopSignals();
-  stopSignals.clear();
-  for (const [id, rec] of map) stopSignals.set(id, rec);
-  return map;
-}
-
 // 启动时把既有停止信号读入内存（服务重启后历史信号仍可被外部主会话消费）
 function loadStopSignals() {
   stopSignals.clear();
@@ -248,10 +244,12 @@ function appendStopSignal(rec) {
   }
 }
 
-// 清理停止信号：删除"已不在 agents 中 / 已结束(done/failed) / 超过 TTL"的条目。
-// 特别注意：agents 为空（服务刚启动、尚未收到任何事件）时没有对照数据，不清理，
-// 避免重启后误删外部主会话尚未消费的待停止信号；TTL 过期条目无论何时都会清掉，
-// 保证文件长期有界。重写用临时文件 + rename 原子替换，避免外部消费者读到半截文件。
+// 清理停止信号：删除"在本轮聚合中出现且已结束(done/failed) / 超过 TTL"的条目。
+// 特别注意：不删除"本服务本轮未聚合过（未 appeared）"的停止信号——服务重启后 agents 里只有
+// 本轮新会话聚合到的 agent id，上一会话遗留的停止信号必须保留，供外部主会话继续消费；
+// 因此不再用旧逻辑 `agents.size > 0 && (!a || terminal)`（那会在重启后误清历史信号）。
+// TTL 过期条目无论何时都会清掉，保证文件长期有界。重写用临时文件 + rename 原子替换，
+// 避免外部消费者读到半截文件。
 function pruneStopSignals() {
   // 先以文件为准刷新内存视图（外部主会话可能已直接增删文件），再基于 agents 状态清理
   const fresh = readStopSignals();
@@ -260,8 +258,10 @@ function pruneStopSignals() {
   const now = Date.now();
   for (const [id, rec] of fresh) {
     const expired = typeof rec.ts === "string" && (now - Date.parse(rec.ts)) > STOP_REQUEST_TTL_MS;
+    // appeared 语义：仅当该 id 在本轮聚合中真实存在（agents 命中）且到达终态才清除。
+    // 未聚合过的 id（本进程从未收到其事件）一律保留，避免重启后误删外部尚未消费的历史信号。
     const a = agents.get(id);
-    const gone = agents.size > 0 && (!a || isTerminalStatus(a.status));
+    const gone = !!a && isTerminalStatus(a.status);
     if (expired || gone) {
       changed = true;
     } else {
@@ -494,6 +494,10 @@ async function maybeRotate() {
 // 允许来源集合（由 ALLOWED_ORIGINS 初始化）：逐请求校验 Origin 是否放行
 const allowedOrigins = new Set(ALLOWED_ORIGINS);
 
+// 允许的 HTTP 方法白名单（与路由实际开放方法严格一致：GET 查询 + POST 停止 + OPTIONS 预检），
+// 供 OPTIONS 预检与停止接口回显 Access-Control-Allow-Methods 使用
+const ALLOWED_METHODS = "GET, POST, OPTIONS";
+
 // 按请求 Origin 计算 CORS 头：无 Origin（同源/curl 等）或不在白名单 → 不附加
 function corsHeadersFor(req) {
   const origin = req && req.headers.origin;
@@ -501,7 +505,7 @@ function corsHeadersFor(req) {
 }
 
 // 停止接口额外允许方法：同源无需 CORS；本地跨端口访问时补 Access-Control-Allow-Methods 亦可
-const STOP_EXTRA_HEADERS = { "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
+const STOP_EXTRA_HEADERS = { "Access-Control-Allow-Methods": ALLOWED_METHODS };
 
 function sendJson(req, res, status, body, extra) {
   const data = JSON.stringify(body);
@@ -531,7 +535,12 @@ function sseSend(res, obj) {
 }
 
 async function handleStream(req, res) {
-  if (sseActive >= SSE_MAX_CLIENTS) {
+  // 先占位再判读：sseActive++ 与上限判断之间没有任何 await。若先判读、等首个 await（stat）后再
+  // 自增，两条同时到达的连接都会在 await 期间看到未自增的计数，从而双双越过上限（条件竞态）。
+  // 超限后回退计数并 503，计数不会泄漏给后续请求。
+  sseActive++;
+  if (sseActive > SSE_MAX_CLIENTS) {
+    sseActive--;
     // 并发连接超限：直接 503 关闭（纯文本），避免持续占用连接资源
     try {
       res.writeHead(503, {
@@ -556,7 +565,6 @@ async function handleStream(req, res) {
   res.write("retry: 2000\n\n");
   res.flushHeaders();
 
-  sseActive++;
   let timer = null;
   const cleanup = () => {
     if (timer) { clearInterval(timer); timer = null; }
@@ -569,9 +577,10 @@ async function handleStream(req, res) {
 
   timer = setInterval(async () => {
     try {
-      // 事件文件尾增量读：与 /api/state 共用同一套 fh.stat / 截断归零逻辑，轮转安全
+      // 事件文件尾增量读：与 /api/state 共用同一套 fh.stat / 截断重读逻辑，轮转安全。
+      // 文件被截断/轮转变小后 readFileRange 本轮会从 0 重读 0..size 的内容（不整段跳过），
+      // 这里只需把 cursor 对齐到新文件大小即可，无需再手动归零。
       const r = await readFileRange(EVENTS_FILE, cursor);
-      if (r.truncated) cursor = 0; // 轮转/截断：从头重新定位
       cursor = r.size;
       for (const line of r.lines) {
         let e;
@@ -629,6 +638,20 @@ const server = createServer(async (req, res) => {
   const corsHeaders = corsHeadersFor(req);
 
   try {
+    // OPTIONS 预检：浏览器跨端口 POST（/api/agents/:id/stop）前会先发预检请求探测可用方法，
+    // 这里统一回 204 并声明允许方法/请求头，避免预检被下方的 405 拦截导致浏览器 POST 失败。
+    // 无 Origin（同源/curl 等）也照常放行（204）；跨域合法性仍由请求头里的 Origin 校验负责。
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Content-Length": 0,
+        "Access-Control-Allow-Methods": ALLOWED_METHODS,
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+        ...corsHeaders,
+      });
+      return void res.end();
+    }
+
     // 仅放开 POST /api/agents/:id/stop（停止子 Agent 的信号入口），其余非 GET 一律 405
     if (req.method !== "GET") {
       if (req.method === "POST") {

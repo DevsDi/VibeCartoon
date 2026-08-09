@@ -2,10 +2,14 @@
 //
 // 直接通过 child_process 以 --dry 模式调用采集器（不写 events.jsonl）：
 //   node hooks/collect.mjs --dry < stdin
-// 断言采集器自身的三个核心契约：
-//   1. 值级脱敏：detail 中 sk-*/Bearer/ghp_/gho_/Slack xox* 等密钥样式 → [REDACTED]
-//   2. 输入限长：stdin 超过 8MB 直接丢弃本条事件，且恒 exit 0
-//   3. 正常事件原样透传（hook 归一化，字段不被误删/误脱敏）
+// 断言采集器自身的核心契约：
+//   1. 值级脱敏：sk-*/Bearer/AKIA/eyJ(JWT 头)/Slack xox* 等密钥样式 → [REDACTED]
+//   2. 字段名黑名单脱敏：private_key / access_key / aws_session_token 等 → [REDACTED]
+//   3. PEM 公私钥整串 → [REDACTED]
+//   4. 截断：超长字符串按 MAX_STR、序列化 detail 按 DETAIL_CAP 截断，均不切出孤立代理对
+//   5. 输入限长：stdin 超过 8MB 直接丢弃，且恒 exit 0
+//   6. 非法 JSON：恒 exit 0，并在 stderr 记录解析失败
+//   7. 正常事件原样透传（hook 归一化，字段不被误删/误脱敏）
 //
 // 运行：npm run test:unit    （要求 Node >= 18，无需浏览器/服务）
 
@@ -17,6 +21,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const COLLECT = path.join("hooks", "collect.mjs");
 const MAX_STDIN_BYTES = 8 * 1024 * 1024;
+// 与 hooks/collect.mjs 中的截断阈值保持一致（测试只做断言依据，不参与采集逻辑）
+const MAX_STR = 250;
+const DETAIL_CAP = 2000;
 
 /** 以指定 stdin 执行 `node hooks/collect.mjs --dry`。
  * @param {string} input stdin 内容
@@ -33,6 +40,25 @@ function runCollect(input) {
   let line = null;
   try { line = JSON.parse((res.stdout || "").trim()); } catch { line = null; }
   return { code: res.status, stdout: res.stdout || "", stderr: res.stderr || "", line };
+}
+
+/** 检测字符串是否含孤立（不成对）的 UTF-16 代理位——增补平面字符（emoji 等）被按 UTF-16
+ * 半字切开时会出现损坏的孤立代理对。用于断言截断是码点安全的。
+ * @param {string} s
+ * @returns {boolean} true 表示含孤立代理位（截断不安全）
+ */
+function hasLoneSurrogate(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) { // 高代理位：后必须跟低代理位才算成对
+      const n = s.charCodeAt(i + 1);
+      if (!(n >= 0xdc00 && n <= 0xdfff)) return true; // 后无低代理位 → 孤立
+      i++; // 跳过已配对的低代理位
+    } else if (c >= 0xdc00 && c <= 0xdfff) { // 孤立低代理位
+      return true;
+    }
+  }
+  return false;
 }
 
 const suites = [];
@@ -120,6 +146,106 @@ suite("正常事件原样透传（hook 归一化，字段不被误删/误脱敏�
   assert.deepStrictEqual(JSON.parse(l.detail), { prompt: "统计代码文件数", depth: 3, ok: true },
     "detail 内容应原样保留（不脱敏、不截断）");
   assert.ok(!r.stdout.includes("[REDACTED]"), "正常事件不应被误脱敏");
+});
+
+// ---------------------------------------------------------------------------
+// 4) 字段名黑名单脱敏
+// ---------------------------------------------------------------------------
+suite("字段名黑名单脱敏：api_key / private_key / access_key / aws_session_token → [REDACTED]", () => {
+  const payload = {
+    hook: "notification",
+    params: {
+      api_key: "opk-eynecxi-0a9",          // 值本身不是密钥样式，仅靠字段名触发整体脱敏
+      private_key: "privk-4c2f-9a1b",
+      access_key: "acck-7d3e-x8",
+      aws_session_token: "sven-1f2c-3d4e",
+      note: "非敏感字段保持原样",
+    },
+  };
+
+  const r = runCollect(JSON.stringify(payload));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  const d = JSON.parse(r.line.detail);
+  assert.strictEqual(d.params.api_key, "[REDACTED]", "api_key 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.private_key, "[REDACTED]", "private_key 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.access_key, "[REDACTED]", "access_key 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.aws_session_token, "[REDACTED]", "aws_session_token 字段名命中应整体脱敏");
+  assert.strictEqual(d.params.note, "非敏感字段保持原样", "非敏感字段不受影响");
+  for (const v of ["opk-eynecxi-0a9", "privk-4c2f-9a1b", "acck-7d3e-x8", "sven-1f2c-3d4e"]) {
+    assert.ok(!r.stdout.includes(v), `stdout 不应残留敏感值: ${v.slice(0, 8)}…`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5) PEM 整串脱敏
+// ---------------------------------------------------------------------------
+suite("PEM 公私钥整串 → [REDACTED]（不残留证书头/内容）", () => {
+  const pem = [
+    "-----BEGIN PRIVATE KEY-----",
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+    "9uBCVRnZ0U8kP1yHZ2iSjOQbt4Nq6wL5",
+    "-----END PRIVATE KEY-----",
+  ].join("\n");
+
+  const r = runCollect(JSON.stringify({ hook: "notification", file: pem }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  const d = JSON.parse(r.line.detail);
+  assert.strictEqual(d.file, "[REDACTED]", "PEM 整块应整体替换为 [REDACTED]");
+  assert.ok(!r.stdout.includes("BEGIN PRIVATE KEY"), "stdout 不应残留 PEM 头");
+  assert.ok(!r.stdout.includes("MIIEvQ"), "stdout 不应残留 PEM 内容片段");
+});
+
+// ---------------------------------------------------------------------------
+// 6) MAX_STR / DETAIL_CAP 截断（码点安全，不切出孤立代理对）
+// ---------------------------------------------------------------------------
+suite("截断：超长字符串按 MAX_STR 截断且不切出孤立代理对", () => {
+  // ASCII 长文本
+  const long = "a".repeat(480);
+  const r = runCollect(JSON.stringify({ hook: "notification", note: long }));
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  const d = JSON.parse(r.line.detail);
+  assert.ok(d.note.endsWith("…[truncated]"), "超出 MAX_STR 应带截断标记");
+  assert.ok([...d.note].length <= MAX_STR + 12, "截断后的码点数不应超过 MAX_STR + 截断标记");
+  assert.ok(!hasLoneSurrogate(d.note), "ASCII 截断结果不应含孤立代理位");
+
+  // 增补平面（emoji）：必然是代理对，截断时不允许切成孤立半字
+  const emojis = "😀".repeat(300); // 300 个 emoji = 600 个 UTF-16 码元，远超 MAX_STR=250
+  const r2 = runCollect(JSON.stringify({ hook: "notification", note: emojis }));
+  assert.strictEqual(r2.code, 0, `exit 应为 0，实为 ${r2.code}`);
+  const d2 = JSON.parse(r2.line.detail);
+  assert.ok(d2.note.endsWith("…[truncated]"), "emoji 超长也应截断");
+  assert.ok(!hasLoneSurrogate(d2.note), "对 emoji 截断不应切出孤立代理位");
+  assert.ok([...d2.note].length <= MAX_STR + 12, "emoji 截断后的码点数应在 MAX_STR + 标记内");
+});
+
+suite("截断：序列化 detail 超过 DETAIL_CAP → 追加截断标记", () => {
+  // 10 个恰好 250 字符的字段：每个都不触发 MAX_STR（字段级）截断，但 JSON 序列化后
+  // 约 2.6k 字符，必然超过 DETAIL_CAP=2000，从而验证 detail 级整段截断。
+  const many = {};
+  for (let i = 0; i < 10; i++) many["f" + i] = "x".repeat(250);
+  const r = runCollect(JSON.stringify({ hook: "notification", ...many }));
+
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.ok(r.line, "stdout 应能解析为事件行 JSON");
+  assert.ok(r.line.detail.endsWith("…[truncated]"), "超出 DETAIL_CAP 应带截断标记");
+  assert.ok(r.line.detail.length <= DETAIL_CAP + 12, "detail 长度不应超过 DETAIL_CAP + 截断标记");
+  assert.ok(!hasLoneSurrogate(r.line.detail), "detail 截断不应含孤立代理位");
+});
+
+// ---------------------------------------------------------------------------
+// 7) JSON 解析失败分支
+// ---------------------------------------------------------------------------
+suite("非法 JSON：畸形输入恒 exit 0，且 stderr 记录解析失败", () => {
+  const r = runCollect('{ "hook": "SubagentStart", "broken": "');
+
+  assert.strictEqual(r.code, 0, `exit 应为 0，实为 ${r.code}`);
+  assert.strictEqual(r.stdout.trim(), "", "解析失败不应输出事件行");
+  assert.ok(
+    r.stderr.includes("JSON 解析失败"),
+    `stderr 应记录解析失败（实际: ${r.stderr.slice(0, 120) || "(空)"}）`
+  );
 });
 
 // ---------------------------------------------------------------------------

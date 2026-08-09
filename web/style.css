@@ -65,37 +65,6 @@ body {
  * （页面左右留白由 .board-wrap 的 padding 负责，见第 7 节） */
 .wrap { width: 100%; max-width: none; padding: 0; }
 
-/* 背景氛围符号层（方向 D，由 app.js 生成）：全屏代码符号沿 bgDrift 自下而上缓慢漂移。
- * 固定铺满全屏、z-index -1：位于 body 背景之上、内容之下，天然隔离不挡交互；
- * 不设 top 属性，仅 inset:0 铺满。 */
-.bg-symbols {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  overflow: hidden;
-  pointer-events: none;
-  font-family: "Cascadia Code", Consolas, "Courier New", monospace;
-  color: var(--text);
-  /* P2：背景符号联动——透明度由 --bg-opacity 驱动（active 越多越亮），默认 0.16 保持现状 */
-  opacity: var(--bg-opacity, 0.16);
-}
-
-.bg-symbols span {
-  position: absolute;
-  opacity: 0;
-  /* P2：漂移时长由 --bg-drift 驱动（active 越多越快），未设置时回退到每个符号的
-   * 随机 --dur（12-24s），再回退 18s，默认值保持现状 */
-  animation: bgDrift var(--bg-drift, var(--dur, 18s)) linear infinite;
-  animation-delay: var(--delay, 0s);
-}
-
-@keyframes bgDrift {
-  0%   { transform: translateY(25vh); opacity: 0; }
-  12%  { opacity: 0.7; }
-  85%  { opacity: 0.4; }
-  100% { transform: translateY(-115vh); opacity: 0; }
-}
-
 /* 基础动画工具都用 CSS 变量传入颜色，避免重复定义 */
 
 /* ---------- 3. 断连横幅 ---------- */
@@ -175,7 +144,7 @@ body {
   letter-spacing: 0.04em;
 }
 
-/* ---------- 4b. 顶部操作区：特效密度 / 音效（P1） ---------- */
+/* ---------- 4b. 顶部操作区：音效启用轻提示（P1） ---------- */
 .header-actions {
   margin-left: auto;
   display: flex;
@@ -183,77 +152,6 @@ body {
   gap: 10px 16px;
   flex-wrap: wrap;
   padding-bottom: 2px;
-}
-
-.ctl-label {
-  font-size: 12px;
-  color: var(--muted);
-  user-select: none;
-}
-
-/* 特效密度下拉 */
-.ctl-select {
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  cursor: pointer;
-}
-
-.ctl-select:focus-visible {
-  outline: 1px solid var(--tool);
-  outline-offset: 1px;
-}
-
-/* 音效开关：滑动开关样式（仍是原生 checkbox，读屏可感知） */
-.ctl-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
-.ctl-check input {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 32px;
-  height: 18px;
-  margin: 0;
-  border-radius: 999px;
-  background: var(--panel-hover);
-  border: 1px solid var(--border);
-  position: relative;
-  cursor: pointer;
-  transition: background-color 0.18s ease, border-color 0.18s ease;
-}
-
-.ctl-check input::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--muted-2);
-  transition: transform 0.18s ease, background-color 0.18s ease;
-}
-
-.ctl-check input:checked {
-  background: rgba(var(--tool-rgb), 0.32);
-  border-color: var(--tool);
-}
-
-.ctl-check input:checked::after {
-  transform: translateX(14px);
-  background: var(--tool);
-}
-
-.ctl-check input:focus-visible {
-  outline: 1px solid var(--tool);
-  outline-offset: 2px;
 }
 
 /* ---------- 4c. 音效启用轻提示（P1） ---------- */
@@ -1150,10 +1048,6 @@ body {
 /* 跑回主 Agent 汇报：镜像翻转（面向左） */
 .stickman-runner.flip { transform: scaleX(-1); }
 
-/* 派发途中掉头返回（returnBackAfterGone）：.flip 的默认规则会隐藏 .stick-head-run，
- * 这里用 .complain-return 把它重新显示，避免火柴人掉头后变成"无头" */
-.stickman-runner.flip.complain-return .stick-head-run { display: block; }
-
 /* 腿部走路摆动（两腿相位相反） */
 .stickman .leg-left,
 .stickman .leg-right {
@@ -1544,6 +1438,17 @@ body {
   .app-footer { padding: 0 18px 22px; }
 }
 
+/* 超窄屏（≤约 872px）：两栏 + 跑道三列总宽下限约 840px，小于该宽度时看板不再
+ * 压缩（保持三列布局与火柴人坐标稳定），改为允许 .board-wrap 横向滚动查看。
+ * justify-content: start 让滚动时贴左对齐，避免 justify-content: center 把
+ * 溢出内容居中导致左侧内容被裁。 */
+@media (max-width: 871px) {
+  .board-wrap {
+    overflow-x: auto;
+    justify-content: start;
+  }
+}
+
 /* ---------- 16. 动效敏感用户 ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -1558,51 +1463,6 @@ body {
   .stickman .leg-right { animation: none; }
   .pc-screen-glow { animation: none !important; }
   .stick-dust, .card-pop { animation: none !important; }
-  /* 背景符号 / 空状态雷达与待机小人（方向 C+D）：停用动画并大幅减淡 */
-  .bg-symbols span, .empty-radar, .empty-radar::before, .empty-radar::after, .empty-stick { animation: none !important; opacity: 0.05; }
+  /* 空状态雷达与待机小人（方向 C）：停用动画并大幅减淡 */
+  .empty-radar, .empty-radar::before, .empty-radar::after, .empty-stick { animation: none !important; opacity: 0.05; }
 }
-
-/* ---------- 16b. 特效密度：减少 / 关闭（P1，显式降级） ---------- */
-/* 页头"特效"下拉选择 reduced / off 时通过 body[data-motion] 显式降级：
- * 规则与上方 @media (prefers-reduced-motion: reduce) 完全一致（reuse 思路），
- * 只加选择器包裹、不改任何动画本体；auto 仍走系统媒体查询。
- * 关闭（off）额外隐藏背景符号层。JS 侧同步用 isMotionReduced() 跳过火柴人/音效。 */
-body[data-motion="reduced"] *,
-body[data-motion="reduced"] *::before,
-body[data-motion="reduced"] *::after,
-body[data-motion="off"] *,
-body[data-motion="off"] *::before,
-body[data-motion="off"] *::after {
-  animation-duration: 0.01ms !important;
-  animation-iteration-count: 1 !important;
-  transition-duration: 0.01ms !important;
-}
-
-/* 火柴人 / 办公场景专属降级（JS 侧也会跳过火柴人创建） */
-body[data-motion="reduced"] .stickman-runner,
-body[data-motion="off"] .stickman-runner { transition: none; }
-body[data-motion="reduced"] .stickman .leg-left,
-body[data-motion="reduced"] .stickman .leg-right,
-body[data-motion="off"] .stickman .leg-left,
-body[data-motion="off"] .stickman .leg-right { animation: none; }
-body[data-motion="reduced"] .pc-screen-glow,
-body[data-motion="off"] .pc-screen-glow { animation: none !important; }
-body[data-motion="reduced"] .stick-dust,
-body[data-motion="off"] .stick-dust,
-body[data-motion="reduced"] .card-pop,
-body[data-motion="off"] .card-pop { animation: none !important; }
-
-/* 背景符号 / 空状态雷达与待机小人：停用动画并大幅减淡 */
-body[data-motion="reduced"] .bg-symbols span,
-body[data-motion="reduced"] .empty-radar,
-body[data-motion="reduced"] .empty-radar::before,
-body[data-motion="reduced"] .empty-radar::after,
-body[data-motion="reduced"] .empty-stick,
-body[data-motion="off"] .bg-symbols span,
-body[data-motion="off"] .empty-radar,
-body[data-motion="off"] .empty-radar::before,
-body[data-motion="off"] .empty-radar::after,
-body[data-motion="off"] .empty-stick { animation: none !important; opacity: 0.05; }
-
-/* 关闭：背景符号层整个不显示 */
-body[data-motion="off"] .bg-symbols { display: none; }

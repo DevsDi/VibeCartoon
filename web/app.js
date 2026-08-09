@@ -78,11 +78,6 @@
   /* 完成反馈增强（B 方向）：.card-pop 弹出动画时长（毫秒），结束后移除类名 */
   const CARD_POP_MS = 620;
 
-  /* 背景氛围符号（方向 D）：全屏缓慢漂移的代码符号，取前 BG_SYMBOL_COUNT 个生成
-   * .bg-symbols 层（每个符号随机位置 / 字号 / 时长 / 延迟，见 init()） */
-  const BG_SYMBOLS = ['<', '>', '{', '}', '/', ';', ':', '=', '#', '*', '_', '[', ']', '(', ')'];
-  const BG_SYMBOL_COUNT = 14;
-
   /* 卡片移除动画时长（毫秒）：.removing 淡出过渡 */
   const REMOVE_ANIM_MS = 420;
 
@@ -93,22 +88,14 @@
   /* 卡片入场动画时长（毫秒）：.enter 过渡结束后移除类名 */
   const ENTER_ANIM_MS = 1700;
 
-  /* 特效密度（P1）：auto=跟随系统 reduced-motion；reduced=显式降级；off=关闭全部。
-   * 持久化到 localStorage（vc-motion）；音效开关 vc-sound 同属动效设置一并持久化。 */
-  const MOTION_KEY = 'vc-motion';
-  const SOUND_KEY = 'vc-sound';
-  const MOTION_LEVELS = ['auto', 'reduced', 'off'];
-  /* 音效启用轻提示的去重键：仅首次访问（且尚未点击页面）时显示一次 */
+  /* 动效与音效策略（固定，无用户可调控件）：
+   * - 动效固定跟随系统（auto）：系统开启 prefers-reduced-motion 时自动减少动态，不持久化。
+   * - 音效默认开启：受浏览器自动播放策略限制，首次需点击页面一次解锁（见 ensureAudio/onUserGesture）。
+   * 音效启用轻提示的去重键：仅首次访问（且尚未点击页面）时显示一次 */
   const SOUND_TIP_KEY = 'vc-sound-tip-seen';
 
   /* SSE 加速刷新（P3）：连接失败连续 3 次后放弃 SSE，回归纯 600ms 轮询兜底 */
   const SSE_MAX_FAILS = 3;
-
-  /* 背景符号联动（P2）：summary.active 驱动的漂移时长与透明度范围（上下限） */
-  const BG_DRIFT_MAX_S = 20;      // active=0 → 最长漂移（最慢）
-  const BG_DRIFT_MIN_S = 5;       // active 很高 → 最短漂移（最快）
-  const BG_OPACITY_MIN = 0.06;    // active=0 → 最暗
-  const BG_OPACITY_MAX = 0.30;    // active 很高 → 最亮
 
   /* 活动卡片网格内的排序优先级：越靠前越优先 */
   const ACTIVE_PRIORITY = { asking: 0, tool: 1, thinking: 2, queued: 3, running: 4, unknown: 5 };
@@ -124,17 +111,17 @@
   let hasSubAgents = false;       // 本轮渲染是否存在存活子 Agent（方案 E：main 正等子 Agent 交回结果时不判待机）
   let pollTimer = null;           // 轮询定时器句柄，页面不可见时暂停用
 
-  /* P1：特效/音效偏好（从 localStorage 读取，默认自动 / 音效开） */
-  let motionLevel = 'auto';
-  let soundOn = true;
+  /* 音效默认开启（无开关状态）：由浏览器自动播放策略约束，首次用户交互后解锁，见 audioCtx */
   let audioCtx = null;            // WebAudio 上下文：加载即惰性创建（suspended），首次用户交互后 resume 解锁
   /* P3：SSE 加速刷新状态 */
   let sse = null;
   let sseFails = 0;
 
   /* 在途派发小人集合：正在途中（toSub）跑向子 Agent 的火柴人的 agent id。
-   * animateAgentChanges 据此抑制 done/failed 时重复创建 backToMain 汇报小人：
-   * 子 Agent 完成/失败时若仍有在途派发小人，跳过 backToMain，避免两个小人同时跑回。 */
+   * 完成/失败时若仍有在途派发小人，跳过 backToMain 创建，避免
+   * "派发中 + 汇报中"两个小人同屏并发跑（见 animateAgentChanges 的守卫）。
+   * 生命周期：runStickman（toSub）入队时 add；launchToSubStickman 的火柴人移除回调
+   * （onRemoved）与队列跳过（runQueuedToSub 中卡片消失 / 队列清空）时 delete。 */
   const inFlightToSub = new Set();
 
   /* 派发火柴人串行队列（方向 A）：toSub 派发小人先入队、逐个执行，
@@ -161,17 +148,9 @@
     els.connBanner = document.getElementById('conn-banner');
     els.updatedAt = document.getElementById('updated-at');
 
-    // P1：特效密度 / 音效开关控件 / aria-live 播报区 / 音效启用轻提示
-    els.motionSelect = document.getElementById('motion-select');
-    els.soundToggle = document.getElementById('sound-toggle');
+    // P1：aria-live 播报区 / 音效启用轻提示（动效与音效为固定策略，无用户控件）
     els.liveRegion = document.getElementById('status-live');
     els.soundTip = document.getElementById('sound-tip');
-    loadPrefs();
-    applyMotion();
-    els.motionSelect.value = motionLevel;
-    els.motionSelect.addEventListener('change', function () { setMotion(els.motionSelect.value); });
-    els.soundToggle.checked = soundOn;
-    els.soundToggle.addEventListener('change', function () { setSound(els.soundToggle.checked); });
 
     // 音效解锁（autoplay 政策）：加载即创建一次 suspended 的 AudioContext（不发声，合法），
     // 任一用户交互（点击/触摸/按键）时 resume 解锁。无交互时 playChime 保持静默（默认不打扰），
@@ -195,23 +174,6 @@
     els.animLayer.className = 'anim-layer';
     els.animLayer.setAttribute('aria-hidden', 'true');
     document.body.appendChild(els.animLayer);
-
-    // 背景氛围符号层（方向 D）：全屏代码符号缓慢漂移，挂在 body 末尾。
-    // 每个符号随机：水平 left% / 垂直 top% / 字号 10-20px / --dur(12-24s) / --delay(0-20s)
-    els.bgSymbols = document.createElement('div');
-    els.bgSymbols.className = 'bg-symbols';
-    els.bgSymbols.setAttribute('aria-hidden', 'true');
-    for (let i = 0; i < BG_SYMBOL_COUNT; i++) {
-      const sp = document.createElement('span');
-      sp.textContent = BG_SYMBOLS[i % BG_SYMBOLS.length];
-      sp.style.left = (Math.random() * 100).toFixed(1) + '%';
-      sp.style.top = (Math.random() * 100).toFixed(1) + '%';
-      sp.style.fontSize = (10 + Math.random() * 10).toFixed(1) + 'px';
-      sp.style.setProperty('--dur', (12 + Math.random() * 12).toFixed(1) + 's');
-      sp.style.setProperty('--delay', (Math.random() * 20).toFixed(1) + 's');
-      els.bgSymbols.appendChild(sp);
-    }
-    document.body.appendChild(els.bgSymbols);
 
     // 初始空状态
     setEmptyVisible(true);
@@ -262,43 +224,12 @@
     els.connBanner.classList.toggle('hidden', ok);
   }
 
-  /* ---------------- 特效/音效/无障碍（P1） ---------------- */
-  /* 读取 localStorage 偏好：特效密度（vc-motion）+ 音效开关（vc-sound） */
-  function loadPrefs() {
-    let m = 'auto';
-    try { m = localStorage.getItem(MOTION_KEY) || 'auto'; } catch (err) { /* 隐私模式等异常忽略 */ }
-    motionLevel = MOTION_LEVELS.indexOf(m) !== -1 ? m : 'auto';
-    let s = '1';
-    try { s = localStorage.getItem(SOUND_KEY) || '1'; } catch (err) { /* 同上 */ }
-    soundOn = s !== '0';
-  }
-
-  /* 设置特效密度并持久化，切换立即生效（无需刷新） */
-  function setMotion(level) {
-    motionLevel = MOTION_LEVELS.indexOf(level) !== -1 ? level : 'auto';
-    try { localStorage.setItem(MOTION_KEY, motionLevel); } catch (err) { /* 隐私模式忽略 */ }
-    applyMotion();
-  }
-
-  /* 应用到 body[data-motion]：CSS 依据该属性显式降级/关闭动画
-   * （auto 交给 style.css 现有的 @media (prefers-reduced-motion: reduce) 处理） */
-  function applyMotion() {
-    document.body.dataset.motion = motionLevel;
-  }
-
-  /* 音效开关：与特效同属动效设置，一并持久化到 localStorage */
-  function setSound(on) {
-    soundOn = !!on;
-    try { localStorage.setItem(SOUND_KEY, soundOn ? '1' : '0'); } catch (err) { /* 忽略 */ }
-  }
-
-  /* 是否处于动效降级：显式 reduced / off，或 auto 且系统开启 reduced-motion。
-   * 火柴人、庆祝、音效等重特效统一走这个判定。 */
+  /* ---------------- 音效 / 无障碍（P1） ---------------- */
+  /* 是否处于动效降级（固定 auto）：仅系统开启 prefers-reduced-motion 时降级。
+   * 火柴人、庆祝、音效等重特效统一走这个判定（style.css 另有系统级降级）。 */
   function isMotionReduced() {
-    if (motionLevel === 'reduced' || motionLevel === 'off') return true;
-    if (motionLevel === 'auto' && window.matchMedia &&
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
-    return false;
+    return !!(window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
 
   /* WebAudio 上下文懒加载（autoplay 政策）：
@@ -324,7 +255,8 @@
     hideSoundTip();
   }
 
-  /* 音效启用轻提示（P1）：仅首次访问、且尚未点击页面时显示。
+  /* 音效启用轻提示：音效默认开启，但受浏览器自动播放策略限制需先点击页面一次解锁，
+   * 故仅首次访问、且尚未点击页面时提示"点击页面启用完成音效"。
    * 显示判定须在 init 首次 ensureAudio() 之前执行（此刻 audioCtx 仍为 null 表示"尚未交互"）；
    * 已看过（vc-sound-tip-seen=1）则不重复打扰。 */
   function maybeShowSoundTip() {
@@ -347,13 +279,12 @@
     }, 260);
   }
 
-  /* 完成/失败提示音（P1，零依赖 WebAudio）：
+  /* 完成/失败提示音（P1，零依赖 WebAudio，默认开启）：
    * done → 两个短促上升正弦音；failed → 低沉下降音。
-   * 尊重音效开关与动效降级（reduced/off 不播）；audioCtx 为 null（无 WebAudio 支持）不播；
+   * 跟随系统 reduced-motion 时静音（与动效降级同步）；audioCtx 为 null（无 WebAudio 支持）不播；
    * 存在但处于 suspended（极少数）时先尝试 resume，能否出声交由浏览器裁决，失败静默不报错。 */
   function playChime(kind) {
-    if (!soundOn) return;
-    if (isMotionReduced()) return;   // 降级/关闭特效时同步静音
+    if (isMotionReduced()) return;   // 系统 reduced-motion 时同步静音
     if (!audioCtx) return;           // 无 WebAudio 支持，静默降级
     if (audioCtx.state === 'suspended') {
       audioCtx.resume().catch(function () { /* 忽略拒绝 */ });
@@ -410,6 +341,7 @@
     try {
       sse = new EventSource('/api/stream');
       sse.onmessage = function (ev) {
+        if (document.hidden) return; // 后台标签页：SSE 事件同样不触发轮询（与轮询暂停对齐）
         try {
           const msg = JSON.parse(ev.data || '');
           if (msg && msg.type === 'event') {
@@ -428,21 +360,6 @@
     } catch (err) {
       sse = null; // 创建失败 → 走纯轮询兜底
     }
-  }
-
-  /* ---------------- 背景符号联动（P2） ----------------
-   * 每次 render 用 summary.active 数量设置 CSS 变量：
-   *   --bg-drift  漂移时长（active 越多 → 越短 → 漂得更快，上下限 5-20s）
-   *   --bg-opacity 透明度（active 越多 → 越亮，上下限 0.06-0.30）
-   * CSS 侧 .bg-symbols / .bg-symbols span 使用这两个变量（默认值保持现状）。 */
-  function applyBackgroundIntensity(summary) {
-    const s = summary || {};
-    const active = (typeof s.active === 'number' && isFinite(s.active)) ? Math.max(0, s.active) : 0;
-    const drift = Math.max(BG_DRIFT_MIN_S, Math.min(BG_DRIFT_MAX_S, BG_DRIFT_MAX_S - active * 1.5));
-    const op = Math.max(BG_OPACITY_MIN, Math.min(BG_OPACITY_MAX, BG_OPACITY_MIN + active * 0.02));
-    const root = document.documentElement;
-    root.style.setProperty('--bg-drift', drift.toFixed(1) + 's');
-    root.style.setProperty('--bg-opacity', op.toFixed(2));
   }
 
   /* ---------------- 轮询启停（页面不可见时暂停用） ---------------- */
@@ -507,9 +424,6 @@
   function render(data) {
     const agents = Array.isArray(data.agents) ? data.agents : [];
     renderFooter(data.updatedAt);
-
-    // P2：背景符号联动——summary.active 数量驱动漂移时长与透明度
-    applyBackgroundIntensity(data.summary);
 
     // 方向 B：更新 lastSeen 快照（agent id -> 时间戳），供超时回收判定使用
     updateLastSeenMap(agents);
@@ -616,10 +530,34 @@
       return;
     }
 
-    // 新子 Agent 出现 → 火柴人从主 Agent 跑过去 + 卡片顶部"新任务"闪烁标记
+    /* 首帧即终态的新子 Agent（prev 缺省、now 为 done/failed）：renderActive 已将其
+     * 从活动列排除，若不处理会"静默整卡消失"。这里视为"出现即完成"：手动渲染一张
+     * 终态卡（状态区 ✅/❌）并走正常离场（leaveCard 挥手拜拜 → 淡出），而非闪没。 */
+    agents.forEach(function (a) {
+      if (a.id === 'main' || prevAgentMap.has(a.id)) return;
+      const st = nowMap.get(a.id);
+      if (st !== 'done' && st !== 'failed') return;
+      if (activeCards[a.id]) return; // 已存在（重复防护）
+      const isDone = st === 'done';
+      const rec = upsertCard(a, activeCards, els.activeGrid); // 创建并渲染终态状态区
+      if (!isDone) markCardFailed(rec.el); // 失败视觉（红辉光 + 😢 + 状态区"失败"）
+      if (isDone) {
+        playChime('done');
+        announce('子 Agent ' + displayName(a) + ' 完成');
+      } else {
+        playChime('failed');
+        announce('子 Agent ' + displayName(a) + ' 失败');
+      }
+      // 立即挥手拜拜 → 淡出离场（首帧终态无派发/汇报时序可等，不设等待窗口）
+      leaveCard(a.id, 0, isDone);
+    });
+
+    // 新子 Agent 出现（非终态） → 火柴人从主 Agent 跑过去 + 卡片顶部"新任务"闪烁标记
     const toSubThisRound = new Set(); // 本轮已派过火柴人的子 Agent（补充派发去重用）
     agents.forEach(function (a) {
       if (a.id !== 'main' && !prevAgentMap.has(a.id)) {
+        const st = nowMap.get(a.id);
+        if (st === 'done' || st === 'failed') return; // 终态新卡已由上方"出现即完成"处理
         toSubThisRound.add(a.id);
         runStickman('toSub', a);
         showNewTaskTag(a.id); // C：新任务标记
@@ -634,6 +572,8 @@
       let target = null;
       agents.forEach(function (a) {
         if (a.id === 'main' || toSubThisRound.has(a.id)) return;
+        const targetNow = nowMap.get(a.id);
+        if (targetNow === 'done' || targetNow === 'failed') return; // 终态卡不进补充派发
         if (!target || (a.lastSeen || '') > (target.lastSeen || '')) target = a;
       });
       if (target) {
@@ -652,7 +592,7 @@
       if (prev && prev !== 'done' && prev !== 'failed' &&
           (now === 'done' || now === 'failed')) {
         const isDone = now === 'done';
-        const isReduced = isMotionReduced(); // P1：统一按特效密度/系统 reduced-motion 判定
+        const isReduced = isMotionReduced(); // P1：跟随系统 reduced-motion 判定
         // 交接第二步：子 Agent 办公小人拿起文件 → 火柴人（持文件）跑回主 Agent 汇报
         const cardEl = getCardElById(a.id);
         setOfficeFile(cardEl, true);
@@ -677,8 +617,9 @@
         // （celebrateCard 之后执行，避免与粒子动画同帧叠加；cardEl 已在分支顶部取得）
         if (isDone) popCard(cardEl);
         // 火柴人跑回汇报：done → 😄 + 带回绿勾；failed → 😢 不带绿勾（第三参 isFailed）。
-        // 若该 agent 仍有在途派发小人（inFlightToSub），掉头小人已负责"返回"，
-        // 跳过 backToMain，避免两个小人同时跑回主 Agent 造成视觉重复
+        // 若该 agent 仍有在途派发小人（inFlightToSub 已标记，见 toSub 入队），
+        // 跳过 backToMain：派发小人仍在路上，避免"派发中 + 汇报中"两小人同屏并发跑
+        // （派发小人到站后即结束，不二次补发汇报）
         if (!inFlightToSub.has(a.id)) {
           runStickman('backToMain', a, !isDone);
         }
@@ -817,17 +758,17 @@
   /* direction: 'toSub'（主 → 子）| 'backToMain'（子 → 主）
    * isFailed（仅 backToMain 有效）：子 Agent 最终状态为 failed 时火柴人表情切换为
    * 😢 且不带汇报绿勾（.report 仅在 done 时挂，见 style.css）。
-   * 路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有宽阔跑道（列间 gap 100px）。
-   * 两栏布局（跑道 ≥ 30px）时火柴人沿虚线方向直线过渡——从来源卡片右缘中心斜线
+   * 路径：主 Agent 在左栏、子 Agent 在右栏，两栏之间有跑道（中间 minmax 轨道，恒 ≥80px；
+   * 布局始终三列，无窄屏单列回退）。火柴人沿跑道直线过渡——从来源卡片右缘中心斜线
    * 走到目标卡片左缘中心，方向与 SVG 发散虚线一致（虚线也由主卡右缘中心 → 子卡
    * 左缘中心，火柴人只是起点/终点在卡片边缘 ±20px 内、y 相同 → 平行贴合虚线）；
-   * 窄屏单栏（两栏间距 < 30px）时同样退化为直线过渡。
+   * 窄屏溢出由 style.css 让 .board-wrap 横向滚动兜底。
    * 方向 A（并发排队）：toSub 派发先入队串行执行（避免多个派发小人重叠跑），
    * backToMain 汇报保持直接执行不排队（原有逻辑不变）。 */
   function runStickman(direction, agent, isFailed) {
     const layer = els.animLayer;
     if (!layer || !agent || agent.id === 'main') return;
-    // 动效敏感用户：直接不创建火柴人（P1：统一按特效密度/系统 reduced-motion 判定；
+    // 动效敏感用户：直接不创建火柴人（P1：跟随系统 reduced-motion 判定；
     // style.css 另有全局降级）
     if (isMotionReduced()) return;
 
@@ -835,6 +776,9 @@
     // 否则等上一个火柴人的移除回调继续出队（串行排队，同一时刻至多 1 个派发小人）
     if (direction === 'toSub') {
       stickmanQueue.push(agent.id);
+      // 入队即标记在途（火柴人移除 / 到站后清除，见 runQueuedToSub 与
+      // launchToSubStickman 的 onRemoved）：供完成瞬间抑制重复 backToMain。
+      inFlightToSub.add(agent.id);
       if (!stickmanBusy) runQueuedToSub();
       return;
     }
@@ -863,21 +807,12 @@
     const startY = fromRect.top + fromRect.height / 2;
     const endX = toRect.right - 20;
     const endY = toRect.top + toRect.height / 2;
-    // 两栏间距（来源卡片边缘 - 目标卡片边缘）；≥30px 视为两栏跑道可用
-    const runway = fromRect.left - toRect.right;
 
-    let totalMs;
-    if (runway >= 30) {
-      // 两栏布局：沿虚线方向直线过渡。火柴人从来源卡片边缘中心斜线走到目标卡片
-      // 边缘中心，方向与 SVG 发散虚线一致；起点/终点均在卡片边缘 ±20px 内，
-      // 斜线全程位于两栏之间的跑道区域，不压卡片。总时长 = STICKMAN_TRAVEL_MS 5s
-      totalMs = STICKMAN_TRAVEL_MS;
-      driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
-    } else {
-      // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s，与两栏节奏接近）
-      totalMs = STICKMAN_TRAVEL_MS;
-      driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
-    }
+    // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥80px ≥30px）：火柴人沿跑道
+    // 直线过渡，总时长 = STICKMAN_TRAVEL_MS 5s。（旧 <30px 窄屏单列 else 分支为
+    // 死代码——布局始终三列，已删除；窄屏溢出由 style.css 横向滚动兜底）
+    const totalMs = STICKMAN_TRAVEL_MS;
+    driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs);
 
     // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
     spawnStickDust(stick, totalMs);
@@ -893,13 +828,19 @@
   function runQueuedToSub() {
     stickmanBusy = true;
     // 兜底：队列累计长度异常（如 >20）时清空队列防卡死
-    if (stickmanQueue.length > 20) stickmanQueue.length = 0;
+    if (stickmanQueue.length > 20) {
+      stickmanQueue.length = 0;
+      inFlightToSub.clear(); // 队列被清空，无人承担火柴人：同步清除在途标记
+    }
     let id;
     while (stickmanQueue.length > 0) {
       id = stickmanQueue.shift();
       // 存在则创建 toSub 火柴人并启动（由 driveStickman 移除回调继续出队）；
-      // 卡片已不存在则跳过，继续出队下一个
+      // 卡片已不存在则跳过（该 id 不会创建火柴人，先清除在途标记再继续出队下一个）
       if (launchToSubStickman(id)) return;
+      inFlightToSub.delete(id);
+      // 若队列中仍有同一 agent 的后续派发，保持"在途"标记
+      if (stickmanQueue.indexOf(id) !== -1) inFlightToSub.add(id);
     }
     // 队列已空（或全部卡片已消失）：复位忙碌标记
     stickmanBusy = false;
@@ -931,25 +872,22 @@
       const startY = fromRect.top + fromRect.height / 2;
       const endX = toRect.left + 20;
       const endY = toRect.top + toRect.height / 2;
-      // 两栏间距（目标卡片边缘 - 来源卡片边缘）；≥30px 视为两栏跑道可用
-      const runway = toRect.left - fromRect.right;
 
-      // 火柴人移除回调（方向 A）：标记队列空闲并继续出队下一个（若队列非空）
+      // 火柴人移除回调（方向 A）：清理该 agent 在途派发标记 + 标记队列空闲，
+      // 并继续出队下一个（若队列非空）。driveStickman 移除时必回调（含取消/异常收尾）
       const onRemoved = function () {
+        inFlightToSub.delete(id);
+        // 同一 agent 可能已在队列中再次派发：仍排队则保持"在途"标记，防止误放行 backToMain
+        if (stickmanQueue.indexOf(id) !== -1) inFlightToSub.add(id);
         stickmanBusy = false;
         if (stickmanQueue.length > 0) runQueuedToSub();
       };
 
-      let totalMs;
-      if (runway >= 30) {
-        // 两栏布局：沿虚线方向直线过渡（派发 toSub 路径，与 runStickman 原逻辑一致）
-        totalMs = STICKMAN_TRAVEL_MS;
-        driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, onRemoved);
-      } else {
-        // 窄屏单栏布局：退化为直接直线过渡（同样放慢到 5s）
-        totalMs = STICKMAN_TRAVEL_MS;
-        driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, onRemoved);
-      }
+      // 两栏布局（左主右子，跑道即中间 minmax 轨道、恒 ≥80px ≥30px）：火柴人沿跑道
+      // 直线过渡，总时长 = STICKMAN_TRAVEL_MS 5s。（旧 <30px 窄屏单列 else 分支为
+      // 死代码——布局始终三列，已删除；窄屏溢出由 style.css 横向滚动兜底）
+      const totalMs = STICKMAN_TRAVEL_MS;
+      driveStickman(stick, buildRunPath({ x: startX, y: startY }, { x: endX, y: endY }, totalMs), totalMs, onRemoved);
       launched = true; // 已启动：此后异常交由 onRemoved 收尾
 
       // 脚底尘土（A 方向）：跑动期间脚下迸出小土点，totalMs+100 后停止生成
@@ -1218,7 +1156,10 @@
         if (id === 'main') return;                    // 主 Agent 常驻，不参与超时回收
         if (currentIds.has(id)) return;               // 本轮仍存在 → 跳过
         const prev = prevAgentMap.get(id);
-        if (prev === 'done' || prev === 'failed') return; // done/failed 正常回收不误判
+        if (prev === 'done' || prev === 'failed') {
+          lastSeenMap.delete(id); // 完成/失败属正常回收：清理快照，避免 lastSeenMap 无界增长
+          return;
+        }
         if (!ts || !isFinite(ts) || now - ts <= STALE_FRONT_MS) return; // 未超时 → 跳过
         // 判定为超时回收：卡片仍在 DOM 则挂 .timeout-leaving（😴 打盹）并安排淡出移除；
         // 已在离场（is-leaving）/ 淡出移除（removing）中的卡片交由现有动画收尾
@@ -1597,6 +1538,9 @@
 
   /* 边框脉冲一次（提示状态发生变化） */
   function flashCard(rec) {
+    // 入场窗口内不闪烁：.cardFlash 与 .enter 同挂 animation 会覆盖入场动画，
+    // 使 fade-in 被截断（卡片闪一下即跳变）。入场结束（JS 移除 enter）后再允许闪烁。
+    if (rec.el.classList.contains('enter')) return;
     if (rec.flashTimer) window.clearTimeout(rec.flashTimer);
     const el = rec.el;
     el.classList.remove('status-flash');
