@@ -118,6 +118,14 @@ function isActiveStatus(status) {
 
 // 权威转录解析器（模块级累积）：跨多次 reconcile 保留完整 started/completed/keyMap。
 // 首读某会话时水位为 0 → 全量读（对账需要完整 started 集）；之后仅增量补充新行。
+// 设计意图（修复项2：为何不做清理）：对账以「完整历史」为权威依据——started 记录所有
+// 已启动的子 Agent、completed 记录所有终态通知、keyMap 记录 callId↔agentId 桥接。
+// 一旦清理，过期删除会误判「转录无记录」而删掉仍在运行/刚完成的 Agent，形成
+// 「删除→回填→僵尸修复」的循环。故保留完整历史以保证对账正确性：条目量级受
+// 会话数限制（每会话的 Agent 启动/通知数有限；会话按注册表 TTL 过期后不再增量重读，
+// 新会话数也是工作区内有限规模），单条目仅为少量字符串，内存占用可忽略——
+// 常驻完整历史是刻意的取舍，而非遗漏。uuidCall/uuidAgent 这类临时桥接映射
+// 则经 pruneBridges() 有界化（见 transcript.mjs），长跑下整体内存有界。
 const parser = createTranscriptParser();
 
 /**
@@ -148,6 +156,7 @@ export async function reconcile(deps) {
   // 3) 增量读各会话转录，累积权威映射
   let anyRead = false;    // 是否至少成功读过一次转录（无 → 不做删除，因缺少权威依据）
   let allReadable = true; // 看板 scope 内所有尝试会话都可读（scope 内任一会话不可读 → 保守跳过删除）
+  const unreadableSessions = []; // 修复项3：scope 内不可读的会话 { id, reason }，用于告警日志排查
   for (const sessionId of sessionIds) {
     stats.scannedSessions++;
     const reg = transcriptPaths.get(sessionId);
@@ -160,19 +169,30 @@ export async function reconcile(deps) {
     if (!filePath) {
       if (!inScope) continue; // 后台会话无法定位 → 剔除出扫描集，不阻塞删除
       allReadable = false;
+      unreadableSessions.push({ id: sessionId, reason: "无法解析转录路径（缺 cwd/注册表路径）" });
       continue;
     }
     const r = await readSessionTranscript(sessionId, filePath);
     if (!r.readable) {
       if (!inScope) continue; // 后台会话转录缺失 → 剔除出扫描集，不阻塞删除
       allReadable = false;
+      unreadableSessions.push({ id: sessionId, reason: "转录文件缺失或打开失败" });
       continue;
     }
     anyRead = true;
     stats.transcriptRead++;
     for (const line of r.lines) parser.ingestLine(line);
   }
+  // 修复项3：scope 内任一会话不可读 → 保守跳过全部删除；显式告警列出被阻塞的会话与原因，便于排查
+  if (unreadableSessions.length > 0) {
+    console.warn(
+      "[sync] 会话不可读，跳过删除: " +
+      unreadableSessions.map(({ id, reason }) => `${id} (${reason})`).join("; ")
+    );
+  }
   parser.buildKeyMap();
+  // 修复项1：桥接提交后清理已终态 agent 的 uuid 临时映射（transcript.mjs），保持长期运行下有界
+  parser.pruneBridges();
 
   // 4) 权威集：started（key = 桥出的 agentId，桥不出 → 合成 sync:<callId>）
   const authoritative = new Map();

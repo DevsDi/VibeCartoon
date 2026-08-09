@@ -144,11 +144,12 @@ function normalizeStatus(raw) {
 
 /**
  * 创建一个转录解析器：跨多次增量读累积三份映射。
- * @returns {{ started:Map, completed:Map, keyMap:Map, ingestLine:Function, buildKeyMap:Function }}
+ * @returns {{ started:Map, completed:Map, keyMap:Map, ingestLine:Function, buildKeyMap:Function, pruneBridges:Function }}
  *   started   : Map<callId, { description, uuid, async, ts }>
  *   completed : Map<callId|agentId, "done"|"failed"|"running">（同 key 取最新，后写覆盖；
  *               task-id 通知以 agentId 为 key，tool_result/历史 tool-use-id 以 callId 为 key）
  *   keyMap    : Map<callId, agentId>（需调用 buildKeyMap() 构建）
+ *   pruneBridges() : 清理已提交桥接且 agent 已达终态的 uuidCall/uuidAgent 条目（有界化，见实现处注释）
  */
 export function createTranscriptParser() {
   const started = new Map();   // callId -> { description, uuid, async, ts }
@@ -250,5 +251,28 @@ export function createTranscriptParser() {
     }
   }
 
-  return { started, completed, keyMap, ingestLine, buildKeyMap };
+  // 清理已消费的 uuid 桥接条目（修复项1：uuidCall/uuidAgent 跨会话无界增长）。
+  // 仅清理「桥接已提交到 keyMap 且该 agent 已达终态（done/failed）」的 uuid——
+  // 此时该 uuid 映射已不再需要：
+  //   ① 桥接结果已持久化在 keyMap（callId→agentId），后续查询/对账不依赖 uuid 映射；
+  //   ② 终态后不会再收到新的完成通知；即便有（如批量 stopped 覆盖单个 completed），
+  //      agentId 级 completed 仍是权威，僵尸修复直接按 agentId 键查对账，
+  //      callId 级传播缺失可自愈（最多一次「回填→立即修复」抖动），不破坏最终收敛。
+  // 保留「未达终态」的 uuid（如异步运行中的 agent）：晚到的 task 通知仍需经
+  // reconcileCompleted 由 uuid 映射向 callId 级传播状态，提前清理会误判 running
+  // 而触发无谓的回填。故两 Map 的量级始终受「在途（未终态）桥接数」限制，
+  // 随各会话 agent 收敛即回落，长期运行下有界。
+  function pruneBridges() {
+    for (const [uuid, callId] of uuidCall) {
+      const agentId = uuidAgent.get(uuid);
+      if (!agentId) continue; // 桥接未完成（user 桥接行未读到）→ 保留等待
+      const s = completed.get(agentId);
+      if (s === "done" || s === "failed") {
+        uuidCall.delete(uuid);
+        uuidAgent.delete(uuid);
+      }
+    }
+  }
+
+  return { started, completed, keyMap, ingestLine, buildKeyMap, pruneBridges };
 }

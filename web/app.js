@@ -12,6 +12,7 @@
   /* ---------------- 配置 ---------------- */
   const POLL_INTERVAL = 600;          // 轮询间隔（毫秒）
   const FETCH_TIMEOUT = 2500;         // 单次请求超时（毫秒），防止轮询堆积
+  const SYNC_FETCH_TIMEOUT = 10000;   // 同步请求超时（毫秒）：涉及扫描会话/读取转录/回填修复，耗时较长
   /* main 主 Agent 空闲判定阈值（毫秒）：lastSeen 距今超过该值 → 前端展示"待机"。
    * 仅影响 main 卡片展示，不改服务端数据；有新事件（lastSeen 刷新）自动恢复真实状态 */
   const IDLE_TIMEOUT = 60000;
@@ -297,9 +298,8 @@
       try {
         const ctx = audioCtx;
         const t0 = ctx.currentTime + 0.02;
-        const notes = kind === 'done'
-          ? [{ f: 523.25, at: 0.0, dur: 0.10 }, { f: 659.25, at: 0.10, dur: 0.10 }, { f: 783.99, at: 0.20, dur: 0.15 }]  // C5 → E5 → G5 大三和弦
-          : [{ f: 311.13, at: 0.0, dur: 0.16 }, { f: 207.65, at: 0.16, dur: 0.26 }]; // E♭4 → G♭3 下行（失败音效不变）
+        // 完成音效：C5→E5→G5 大三和弦欢呼；失败等其他音效已禁用（用户要求关闭）
+        const notes = [{ f: 523.25, at: 0.0, dur: 0.10 }, { f: 659.25, at: 0.10, dur: 0.10 }, { f: 783.99, at: 0.20, dur: 0.15 }];
         notes.forEach(function (n) {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
@@ -446,7 +446,7 @@
    * poll() 立即刷新看板。失败仅 console 提示并恢复按钮，不阻断轮询。 */
   async function requestSync() {
     const ctrl = new AbortController();
-    const timer = window.setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT);
+    const timer = window.setTimeout(function () { ctrl.abort(); }, SYNC_FETCH_TIMEOUT);
     try {
       const res = await fetch('/api/sync', {
         method: 'POST', cache: 'no-store', signal: ctrl.signal

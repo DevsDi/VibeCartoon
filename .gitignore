@@ -1,4 +1,5 @@
 data/*.jsonl
+data/*.jsonl.*
 data/*.log
 node_modules/
 .claude/
