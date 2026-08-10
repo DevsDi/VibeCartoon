@@ -197,6 +197,13 @@
         startPolling();
       }
     });
+
+    // FPS 监控（开发模式）：URL 带 debug（query 或 hash）时显示 FPS 浮标
+    // query 用 URLSearchParams 精确匹配参数名，hash 用全等匹配，避免误匹配 ?debugger、?no-debug 等子串
+    const params = new URLSearchParams(location.search);
+    if (params.has('debug') || location.hash === '#debug') {
+      initFPSMonitor();
+    }
   }
 
   /* ---------------- 轮询 ---------------- */
@@ -1778,4 +1785,34 @@
       '<path d="M4 12.5 L10 18.5 L20 5.5" fill="none" stroke="currentColor" ' +
         'stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />' +
     '</svg>';
+
+  /* ---------- FPS 监控（开发模式） ---------- */
+  function initFPSMonitor() {
+    const el = document.createElement('div');
+    el.id = 'fps-monitor';
+    el.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(el);
+
+    let frames = 0;
+    let lastTime = performance.now();
+    let rafId;
+
+    function tick() {
+      frames++;
+      const now = performance.now();
+      if (now - lastTime >= 1000) {
+        el.textContent = Math.round(frames * 1000 / (now - lastTime)) + ' FPS';
+        frames = 0;
+        lastTime = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+
+    // 返回 stop()：取消动画循环并移除 DOM 元素，供运行时关闭 FPS 监控（当前仅作扩展能力，未被调用）
+    return function stop() {
+      cancelAnimationFrame(rafId);
+      el.remove();
+    };
+  }
 })();

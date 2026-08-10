@@ -588,6 +588,7 @@ body {
   -webkit-mask: radial-gradient(circle, transparent 46%, #000 47%);
   mask: radial-gradient(circle, transparent 46%, #000 47%);
   animation: spin 1s linear infinite;
+  will-change: transform;
 }
 
 @keyframes spin {
@@ -625,6 +626,11 @@ body {
 /* asking：黄色脉冲（卡片呼吸）+ 请求气环 */
 .agent-card.status-asking .card-wrap {
   animation: askPulse 1.9s ease-in-out infinite;
+}
+
+/* 卡片 hover 暂停呼吸动画：鼠标悬停时暂停循环动画，移开恢复 */
+.agent-card:hover > .card-wrap {
+  animation-play-state: paused;
 }
 
 @keyframes askPulse {
@@ -949,6 +955,7 @@ body {
 .agent-card.status-tool:not(.is-leaving) .office-scene:not(.has-file) .office-arm-r {
   animation: typeKey 0.26s ease-in-out infinite alternate;
   transform-origin: 15px 33px;
+  will-change: transform;
 }
 .agent-card.status-tool:not(.is-leaving) .office-scene:not(.has-file) .office-arm-r {
   animation-delay: 0.13s;
@@ -1338,6 +1345,46 @@ body {
   cursor: not-allowed;
 }
 
+/* 通用按钮焦点环：所有 button[type="button"] 统一 */
+button[type="button"]:focus-visible {
+  outline: 2px solid var(--tool);
+  outline-offset: 2px;
+}
+
+/* 同步按钮：绿色，与按钮主色一致 */
+.sync-btn:focus-visible {
+  outline: 2px solid var(--done);
+  outline-offset: 2px;
+}
+
+/* 停止按钮：红色主调 */
+.stop-agent-btn:focus-visible {
+  outline: 2px solid var(--failed);
+  outline-offset: 2px;
+}
+
+/* 音效提示关闭按钮：小按钮用 1px */
+.sound-tip-close:focus-visible {
+  outline: 1px solid var(--tool);
+  outline-offset: 1px;
+}
+
+/* 按钮按下反馈：鼠标按下时轻微缩小，松开回弹 */
+.sync-btn:active:not(:disabled) {
+  transform: scale(0.96);
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.08s ease;
+}
+
+.stop-agent-btn:active:not(:disabled) {
+  transform: scale(0.96);
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.08s ease;
+}
+
+.sound-tip-close:active {
+  transform: scale(0.90);
+  transition: transform 0.06s ease;
+}
+
 /* 同步中（.busy）：保持主色绿并显示"进行中"脉冲（box-shadow 呼吸发光，仿 askPulse），
  * 覆盖 :disabled 的灰化，让"正在同步"一眼可辨；光标显示忙碌态；
  * 动效敏感用户由全局 reduced-motion 规则停用动画。 */
@@ -1512,4 +1559,21 @@ body {
   .stick-dust, .card-pop { animation: none !important; }
   /* 空状态雷达与待机小人（方向 C）：停用动画并大幅减淡 */
   .empty-radar, .empty-radar::before, .empty-radar::after, .empty-stick { animation: none !important; opacity: 0.05; }
+}
+
+/* ---------- 17. FPS 监控浮标（开发模式，JS 动态创建） ---------- */
+#fps-monitor {
+  position: fixed;
+  bottom: 8px;
+  right: 8px;
+  z-index: 10000;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-weight: 700;
+  color: var(--done);
+  background: rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  user-select: none;
 }
