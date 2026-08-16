@@ -14,6 +14,7 @@
 
 import path from "node:path";
 import { open as openFile } from "node:fs/promises";
+import { closeHandle } from "./file-utils.mjs";
 import { SYNC_STALE_REMOVE_MS, TRANSCRIPT_REGISTRY_TTL_MS } from "../config.mjs";
 import { listActiveSessions } from "./claude-sessions.mjs";
 import {
@@ -72,10 +73,6 @@ export function pruneTranscriptRegistry() {
       resetWatermark(sessionId);
     }
   }
-}
-
-async function closeHandle(fh) {
-  try { await fh.close(); } catch { /* 忽略 */ }
 }
 
 /**

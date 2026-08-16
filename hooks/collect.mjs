@@ -250,8 +250,9 @@ async function main() {
     payload = JSON.parse(input);
   } catch (err) {
     const snippet = String(input).slice(0, 200);
-    await logError(`JSON 解析失败: ${err.message} | 原始输入片段: ${snippet}`);
-    if (DRY) console.error(`[collect] JSON 解析失败: ${err.message}\n[collect] 输入片段: ${snippet}`);
+    const safeSnippet = redactText(snippet);
+    await logError(`JSON 解析失败: ${err.message} | 原始输入片段: ${safeSnippet}`);
+    if (DRY) console.error(`[collect] JSON 解析失败: ${err.message}\n[collect] 输入片段: ${safeSnippet}`);
     return 0;
   }
 

@@ -14,7 +14,9 @@ import { appendFileSync, readFileSync, writeFileSync, renameSync } from "node:fs
 import path from "node:path";
 import { PORT, HOST, MAX_BYTES, EVENTS_FILE, WEB_DIR, STALE_MS, ALLOWED_ORIGINS, STOP_SIGNALS_FILE, STOP_REQUEST_TTL_MS } from "../config.mjs";
 // 自动同步（T8/T9）：对账 + 转录会话注册表登记/重建/TTL 清理
-import { reconcile, registerEvent, rebuildRegistryFromEvents, pruneTranscriptRegistry } from "./sync.mjs";
+import { reconcile, registerEvent, pruneTranscriptRegistry } from "./sync.mjs";
+// 事件文件通用区间读取（共享模块）
+import { readFileRange, closeHandle } from "./file-utils.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -29,42 +31,6 @@ const MIME = {
   ".woff2": "font/woff2",
   ".ttf": "font/ttf",
 };
-
-// ---------------------------------------------------------------------------
-// 事件文件通用区间读取：从 offset 开始读取到文件末尾，返回行数组
-// 文件不存在或 offset 超出范围时返回空数组；文件被截断时自动回退到 0。
-// 实现要点（轮转竞态安全）：打开句柄后用 fh.stat() 取文件尺寸，而非"先 stat 路径再 open"——
-// 避免 stat 与 open 之间目标文件被轮转改名（旧路径已消失/新文件尺寸不同）导致的尺寸错配。
-// 此时打开的是旧 inode（已改名为 .1 的原文件），读到的是该文件真实内容，不丢行。
-// ---------------------------------------------------------------------------
-async function readFileRange(filePath, offset, maxSize = Infinity) {
-  let fh;
-  try {
-    fh = await openFile(filePath, "r");
-  } catch {
-    // 文件瞬时缺失（可能正处于轮转改名窗口或尚未创建）：视为截断/缺失，由调用方复位重试
-    return { lines: [], size: 0, truncated: true };
-  }
-  try {
-    const size = (await fh.stat()).size;
-    // 文件被截断/轮转后变小（size < offset，游标已越过新文件末尾）：
-    // 0..size 段仍是存活的既有事件，本轮直接从 0 重读并把它们返回（正确聚合已有行），
-    // 不再整段跳过只把 offset 复位（旧实现会丢弃这 0..size 段的数据）。
-    // 返回值 truncated=true 通告调用方本轮发生过截断/轮转，需把 offset/cursor 对齐到 size。
-    // rotate 场景保留：轮转期间 rotateBusy 忙标志已让读方等待完成后才 open，
-    // 因此这里打开的是稳定文件；即便撞上改名中的旧 inode，读到的也是其既有内容，不丢行。
-    const start = size < offset ? 0 : offset;
-    if (size === start) return { lines: [], size, truncated: size < offset };
-
-    const readLen = Math.min(size - start, maxSize);
-    const buf = Buffer.alloc(readLen);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, start);
-    const text = buf.subarray(0, bytesRead).toString("utf8");
-    return { lines: text.split(/\r?\n/).filter(Boolean), size, truncated: size < offset };
-  } finally {
-    await closeHandle(fh);
-  }
-}
 
 function delayMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,10 +52,6 @@ async function readNewLines() {
   // 这里统一把 offset 对齐到当前文件大小，无需再针对 truncated 单独归零。
   readOffset = result.size;
   return result.lines;
-}
-
-async function closeHandle(fh) {
-  try { await fh.close(); } catch { /* 忽略 */ }
 }
 
 // 启动时从事件文件头回放历史事件：逐行 processLines/applyEvent 重建 agents Map 真实状态
@@ -310,150 +272,154 @@ function isTerminalStatus(status) {
   return s === "done" || s === "failed";
 }
 
+/** subagent_start：创建或更新 agent，登记名称 */
+function handleSubagentStart(e, key, ts) {
+  let a = agents.get(key);
+  if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
+  if (!a.startTime) a.startTime = ts;
+  a.type = e.type || a.type || "agent";
+  a.status = "queued";
+  a.lastSeen = ts;
+  pushHistory(a, "start");
+  // 消费 post_tool_use 按 agentId 精确登记的名称（并行子 Agent 不会错配，问题2 H1）
+  const entry = agentNames.get(key);
+  // 名称来源优先级（均仅当尚无 name 时写入，避免覆盖已登记/已提取的名称）：
+  //   ① agentNames —— post_tool_use 的 agentId 精确配对（最可靠）
+  //   ② pendingDispatch —— pre_tool_use 主 Agent 派发 Agent 工具时登记的最近一次任务描述
+  //   ③ 事件自带 detail.prompt（SubagentStart hook 的 prompt 字段，collect.mjs 保留）
+  if (!a.name) {
+    if (entry) { a.name = entry.name; agentNames.delete(key); }
+    else if (pendingDispatch.length) {
+      const pend = pendingDispatch.pop();
+      if (pend && pend.name) a.name = pend.name;
+    }
+    else if (e.detail) {
+      try {
+        const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+        const desc = detail?.prompt ?? detail?.description ?? detail?.prompt_text;
+        if (typeof desc === "string" && desc) a.name = desc;
+      } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
+    }
+  }
+}
+
+/** pre_tool_use：记录工具调用，登记 Agent 派发任务描述 */
+function handlePreToolUse(e, key, ts) {
+  let a = agents.get(key);
+  if (!a) {
+    // 缺 start（只有 tool 事件）→ 合成入口，type=agent，startTime=首次事件时间
+    a = newAgent(key, e.type || "agent");
+    a.startTime = ts;
+    agents.set(key, a);
+  }
+  a.status = "tool";
+  if (e.tool != null) {
+    a.currentTool = String(e.tool);
+    a.toolCount = (a.toolCount || 0) + 1;
+    pushHistory(a, `tool:${a.currentTool}`);
+  } else {
+    pushHistory(a, "tool");
+  }
+  // Agent 派发类工具（tool='Agent'，主 Agent 派发子 Agent）：把任务描述登记到待消费队列，
+  // 供即将出现的 subagent_start 提取。不再写给当前 agent —— 否则主 Agent 用 Bash/Grep 等
+  // 普通工具时 description 会污染 main 的名字，且子 Agent 永远拿不到派发描述。
+  // 队列 LIFO：最近一次派发优先；post_tool_use 的 agentId 精确配对优先级更高（见 subagent_start）。
+  if (e.tool === "Agent" && e.detail) {
+    try {
+      const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+      const desc = detail?.tool_input?.description;
+      if (typeof desc === "string" && desc) {
+        pendingDispatch.push({ name: desc, ts: Date.now() });
+      }
+    } catch { /* detail 不合法或结构不符，忽略 */ }
+  }
+  a.lastSeen = ts;
+}
+
+/** post_tool_use：工具调用结束后回填/登记子 Agent 名称 */
+function handlePostToolUse(e, key, ts) {
+  let a = agents.get(key);
+  if (!a) {
+    a = newAgent(key, e.type || "agent");
+    a.startTime = ts;
+    agents.set(key, a);
+  }
+  a.status = "thinking"; // 思考间隙；当前工具保留显示
+  a.lastSeen = ts;
+  pushHistory(a, "thinking");
+  // Agent 工具调用结束后：从 tool_response 取 agentId + description 精确配对。
+  // subagent_start 已先行 → 直接回填名称；post 先行 → 登记供后续 subagent_start 消费（问题2 H1）。
+  if (e.tool === "Agent" && e.detail) {
+    try {
+      const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+      const agentId = detail.tool_response?.agentId;
+      const desc = detail.tool_response?.description ?? detail.tool_input?.description;
+      if (agentId && desc) {
+        const sub = agents.get(String(agentId));
+        if (sub) sub.name = desc;                        // subagent_start 已先行 → 直接回填
+        agentNames.set(String(agentId), { name: desc, ts: Date.now() }); // post 先行 → 供后续消费
+      }
+    } catch { /* detail 不合法或结构不符，忽略 */ }
+  }
+}
+
+/** notification：处理 agent_needs_input 等通知 */
+function handleNotification(e, key, ts) {
+  if (String(e.detail ?? e.message ?? "").includes("agent_needs_input")) {
+    const a = agents.get(key);
+    if (a) {
+      a.status = "asking";
+      a.lastSeen = ts;
+      pushHistory(a, "asking");
+    }
+  }
+}
+
+/** subagent_stop：标记 agent 终态（done/failed） */
+function handleSubagentStop(e, key, ts) {
+  // 防御性：主会话（main）正常不产生 stop 事件；万一出现，跳过 done/failed 标记，避免把主卡永久标记为 ✅/❌
+  if (key === "main") return;
+  let a = agents.get(key);
+  if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
+  // 失败判定：只信任结构化字段（status / detail.error / result.status / success）。
+  // 不做 message 文本匹配——成功结果的文本里也可能出现 "error" 字样
+  // （如 "fixed the error"、"no errors found"），文本匹配会误判（问题4 M2 回退）。
+  let failed = e.status === "error" || e.status === "failed";
+  if (!failed && e.detail) {
+    try {
+      const d = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
+      if (d && (d.error || d.result?.status === "error" || d.status === "error" || d.success === false)) {
+        failed = true;
+      }
+    } catch { /* detail 不合法，忽略 */ }
+  }
+  a.status = failed ? "failed" : "done";
+  a.endTime = ts;
+  a.lastSeen = ts;
+  pushHistory(a, failed ? "error" : "done");
+  // 不再 5 秒后立即删除（问题3 M1）：done/failed 结果保留至 cleanupInactiveAgents
+  // 按 STALE_MS（10 分钟）统一回收；
+  // 同时"删除定时器误删同 key 新 agent"的隐患也随之消除（问题1 H2）。
+}
+
 function applyEvent(e) {
   const hook = e.hook;
   if (!hook || typeof hook !== "string") return;
-
   const isNotification = hook === "notification";
   const key = isNotification
-    ? lastActiveKey // 通知无 agent 归属，挂到最近活跃的 agent 上
+    ? lastActiveKey
     : e.agent != null && String(e.agent) !== ""
       ? String(e.agent)
-      : "main"; // 主会话工具调用没有 agent_id，合成 main 入口
-
+      : "main";
   const rawTs = typeof e.ts === "string" ? e.ts : new Date().toISOString();
-
   switch (hook) {
-    case "subagent_start": {
-      let a = agents.get(key);
-      if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
-      if (!a.startTime) a.startTime = rawTs;
-      a.type = e.type || a.type || "agent";
-      a.status = "queued";
-      a.lastSeen = rawTs;
-      pushHistory(a, "start");
-      // 消费 post_tool_use 按 agentId 精确登记的名称（并行子 Agent 不会错配，问题2 H1）
-      const entry = agentNames.get(key);
-      // 名称来源优先级（均仅当尚无 name 时写入，避免覆盖已登记/已提取的名称）：
-      //   ① agentNames —— post_tool_use 的 agentId 精确配对（最可靠）
-      //   ② pendingDispatch —— pre_tool_use 主 Agent 派发 Agent 工具时登记的最近一次任务描述
-      //   ③ 事件自带 detail.prompt（SubagentStart hook 的 prompt 字段，collect.mjs 保留）
-      if (!a.name) {
-        if (entry) { a.name = entry.name; agentNames.delete(key); }
-        else if (pendingDispatch.length) {
-          const pend = pendingDispatch.pop();
-          if (pend && pend.name) a.name = pend.name;
-        }
-        else if (e.detail) {
-          try {
-            const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-            const desc = detail?.prompt ?? detail?.description ?? detail?.prompt_text;
-            if (typeof desc === "string" && desc) a.name = desc;
-          } catch { /* detail 不是 JSON 或结构不符，忽略 */ }
-        }
-      }
-      break;
-    }
-    case "pre_tool_use": {
-      let a = agents.get(key);
-      if (!a) {
-        // 缺 start（只有 tool 事件）→ 合成入口，type=agent，startTime=首次事件时间
-        a = newAgent(key, e.type || "agent");
-        a.startTime = rawTs;
-        agents.set(key, a);
-      }
-      a.status = "tool";
-      if (e.tool != null) {
-        a.currentTool = String(e.tool);
-        a.toolCount = (a.toolCount || 0) + 1;
-        pushHistory(a, `tool:${a.currentTool}`);
-      } else {
-        pushHistory(a, "tool");
-      }
-      // Agent 派发类工具（tool='Agent'，主 Agent 派发子 Agent）：把任务描述登记到待消费队列，
-      // 供即将出现的 subagent_start 提取。不再写给当前 agent —— 否则主 Agent 用 Bash/Grep 等
-      // 普通工具时 description 会污染 main 的名字，且子 Agent 永远拿不到派发描述。
-      // 队列 LIFO：最近一次派发优先；post_tool_use 的 agentId 精确配对优先级更高（见 subagent_start）。
-      if (e.tool === "Agent" && e.detail) {
-        try {
-          const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-          const desc = detail?.tool_input?.description;
-          if (typeof desc === "string" && desc) {
-            pendingDispatch.push({ name: desc, ts: Date.now() });
-          }
-        } catch { /* detail 不合法或结构不符，忽略 */ }
-      }
-      a.lastSeen = rawTs;
-      break;
-    }
-    case "post_tool_use": {
-      let a = agents.get(key);
-      if (!a) {
-        a = newAgent(key, e.type || "agent");
-        a.startTime = rawTs;
-        agents.set(key, a);
-      }
-      a.status = "thinking"; // 思考间隙；当前工具保留显示
-      a.lastSeen = rawTs;
-      pushHistory(a, "thinking");
-      // Agent 工具调用结束后：从 tool_response 取 agentId + description 精确配对。
-      // subagent_start 已先行 → 直接回填名称；post 先行 → 登记供后续 subagent_start 消费（问题2 H1）。
-      if (e.tool === "Agent" && e.detail) {
-        try {
-          const detail = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-          const agentId = detail.tool_response?.agentId;
-          const desc = detail.tool_response?.description ?? detail.tool_input?.description;
-          if (agentId && desc) {
-            const sub = agents.get(String(agentId));
-            if (sub) sub.name = desc;                        // subagent_start 已先行 → 直接回填
-            agentNames.set(String(agentId), { name: desc, ts: Date.now() }); // post 先行 → 供后续消费
-          }
-        } catch { /* detail 不合法或结构不符，忽略 */ }
-      }
-      break;
-    }
-    case "notification": {
-      if (String(e.detail ?? e.message ?? "").includes("agent_needs_input")) {
-        const a = agents.get(key);
-        if (a) {
-          a.status = "asking";
-          a.lastSeen = rawTs;
-          pushHistory(a, "asking");
-        }
-      }
-      break;
-    }
-    case "subagent_stop": {
-      // 防御性：主会话（main）正常不产生 stop 事件；万一出现，跳过 done/failed 标记，避免把主卡永久标记为 ✅/❌
-      if (key === "main") break;
-      let a = agents.get(key);
-      if (!a) { a = newAgent(key, e.type || "agent"); agents.set(key, a); }
-      // 失败判定：只信任结构化字段（status / detail.error / result.status / success）。
-      // 不做 message 文本匹配——成功结果的文本里也可能出现 "error" 字样
-      // （如 "fixed the error"、"no errors found"），文本匹配会误判（问题4 M2 回退）。
-      let failed = e.status === "error" || e.status === "failed";
-      if (!failed && e.detail) {
-        try {
-          const d = typeof e.detail === "string" ? JSON.parse(e.detail) : e.detail;
-          if (d && (d.error || d.result?.status === "error" || d.status === "error" || d.success === false)) {
-            failed = true;
-          }
-        } catch { /* detail 不合法，忽略 */ }
-      }
-      a.status = failed ? "failed" : "done";
-      a.endTime = rawTs;
-      a.lastSeen = rawTs;
-      pushHistory(a, failed ? "error" : "done");
-      // 不再 5 秒后立即删除（问题3 M1）：done/failed 结果保留至 cleanupInactiveAgents
-      // 按 STALE_MS（10 分钟）统一回收；
-      // 同时"删除定时器误删同 key 新 agent"的隐患也随之消除（问题1 H2）。
-      break;
-    }
-    default:
-      // 未知 hook 忽略
-      return;
+    case "subagent_start": handleSubagentStart(e, key, rawTs); break;
+    case "pre_tool_use":  handlePreToolUse(e, key, rawTs);    break;
+    case "post_tool_use": handlePostToolUse(e, key, rawTs);   break;
+    case "notification":  handleNotification(e, key, rawTs);  break;
+    case "subagent_stop": handleSubagentStop(e, key, rawTs);  break;
+    default: return;
   }
-
   if (!isNotification) lastActiveKey = key;
 }
 
@@ -555,6 +521,7 @@ function sendJson(req, res, status, body, extra) {
 // ---------------------------------------------------------------------------
 const SSE_INTERVAL_MS = 2000; // 推送/检查周期
 const SSE_MAX_CLIENTS = 5;    // 最大同时保持的 SSE 连接数
+const MAX_BODY_SIZE = 1024 * 1024; // POST 请求体大小限制：1MB
 let sseActive = 0;            // 当前活跃 SSE 连接数
 
 function sseSend(res, obj) {
@@ -730,6 +697,38 @@ const server = createServer(async (req, res) => {
     // 其余非 GET 一律 405
     if (req.method !== "GET") {
       if (req.method === "POST") {
+        // 第一道防线：Content-Length 头快速拒绝（可被伪造，仅作优化）
+        const contentLength = parseInt(req.headers["content-length"] || "0", 10) || 0;
+        if (contentLength > MAX_BODY_SIZE) {
+          return sendJson(req, res, 413, { ok: false, error: "请求体超出大小限制" });
+        }
+
+        // 第二道防线：流式读取 body 并限制实际字节数（防止 Content-Length 伪造或省略）
+        const chunks = [];
+        let totalBytes = 0;
+        let bodyExceeded = false;
+
+        await new Promise((resolve) => {
+          req.on("data", (chunk) => {
+            totalBytes += chunk.length;
+            if (totalBytes > MAX_BODY_SIZE) {
+              bodyExceeded = true;
+              req.destroy(); // 立即终止连接，阻止继续传输
+              return;
+            }
+            chunks.push(chunk);
+          });
+
+          req.on("end", () => resolve());
+          req.on("error", () => resolve());
+          req.on("close", () => resolve());
+        });
+
+        if (bodyExceeded) {
+          // 已通过 req.destroy() 终止连接，返回 413（若连接仍可用）
+          return sendJson(req, res, 413, { ok: false, error: "请求体超出大小限制" });
+        }
+
         // 置于最前：/api/agents/clear 不命中下方 stop 正则（stop 要求 /stop 后缀），此判断避免误配
         if (pathname === "/api/agents/clear") {
           return handleClearAgents(req, res);
@@ -795,8 +794,10 @@ const server = createServer(async (req, res) => {
     // 静态资源
     return serveStatic(pathname, res, corsHeaders);
   } catch (err) {
+    // 记录完整错误信息到服务端日志，便于排查问题
+    console.error(`[500] ${req.method} ${pathname}`, err);
     try {
-      sendJson(req, res, 500, { error: "internal error", message: String(err.message || err) });
+      sendJson(req, res, 500, { error: "internal error" });
     } catch { /* 响应已发送 */ }
   }
 });

@@ -21,40 +21,9 @@
 
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { open as openFile } from "node:fs/promises";
 import { TRANSCRIPT_ROOT } from "../config.mjs";
-
-// ---------------------------------------------------------------------------
-// 事件文件通用区间读取（与 server.mjs 同款逻辑）
-// ---------------------------------------------------------------------------
-async function closeHandle(fh) {
-  try { await fh.close(); } catch { /* 忽略 */ }
-}
-
-async function readFileRange(filePath, offset, maxSize = Infinity) {
-  let fh;
-  try {
-    fh = await openFile(filePath, "r");
-  } catch {
-    // 文件瞬时缺失 / 从未创建 → exists=false，调用方标记会话不可读
-    return { lines: [], size: 0, truncated: true, exists: false };
-  }
-  try {
-    const size = (await fh.stat()).size;
-    // 文件被截断/轮转后变小（size < offset，游标已越过新文件末尾）：
-    // 0..size 段仍是存活的既有行，本轮直接从 0 重读并返回，不丢行。
-    const start = size < offset ? 0 : offset;
-    if (size === start) return { lines: [], size, truncated: size < offset, exists: true };
-
-    const readLen = Math.min(size - start, maxSize);
-    const buf = Buffer.alloc(readLen);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, start);
-    const text = buf.subarray(0, bytesRead).toString("utf8");
-    return { lines: text.split(/\r?\n/).filter(Boolean), size, truncated: size < offset, exists: true };
-  } finally {
-    await closeHandle(fh);
-  }
-}
+// 事件文件通用区间读取（共享模块）
+import { readFileRange, closeHandle } from "./file-utils.mjs";
 
 // ---------------------------------------------------------------------------
 // T5 会话水位
